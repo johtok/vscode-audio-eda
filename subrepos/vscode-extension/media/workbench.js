@@ -72,6 +72,7 @@
   const state = JSON.parse(JSON.stringify(bootstrap));
   ensureTransformParamState();
   normalizeLegacyTransformKinds();
+  normalizeStackItems();
 
   const stackList = byId("stack-list");
   const addTransformButton = byId("add-transform");
@@ -131,6 +132,7 @@
   let derivedCache = createEmptyDerivedCache();
   let resizeTick = 0;
   let selectedViewId = null;
+  const expandedRowSettingsIds = new Set();
 
   const viewStateById = Object.create(null);
   const playheadElementsByViewId = new Map();
@@ -157,6 +159,34 @@
       if (item && item.kind === "stft") {
         item.kind = "magnitude_spectrogram";
       }
+    });
+  }
+
+  function normalizeStackItems() {
+    if (!Array.isArray(state.stack)) {
+      state.stack = [];
+      return;
+    }
+
+    state.stack.forEach(function (item, index) {
+      if (!item || typeof item !== "object") {
+        state.stack[index] = {
+          id: "view-" + Date.now() + "-" + index,
+          kind: "timeseries",
+          params: {}
+        };
+        return;
+      }
+
+      if (!item.id) {
+        item.id = "view-" + Date.now() + "-" + index;
+      }
+
+      if (!item.kind) {
+        item.kind = "timeseries";
+      }
+
+      ensureStackItemParams(item);
     });
   }
 
@@ -187,12 +217,11 @@
 
   function createEmptyDerivedCache() {
     return {
-      stft: null,
-      mel: null,
-      mfcc: null,
-      dct: null,
-      customFilterbank: null,
-      customFilterbankKey: null
+      stftByKey: Object.create(null),
+      melByKey: Object.create(null),
+      mfccByKey: Object.create(null),
+      dctByKey: Object.create(null),
+      customFilterbankByKey: Object.create(null)
     };
   }
 
@@ -238,9 +267,8 @@
     return best;
   }
 
-  function getStftParams() {
-    ensureTransformParamState();
-    const stft = state.transformParams.stft;
+  function sanitizeStftParams(stftSource) {
+    const stft = stftSource || DEFAULT_TRANSFORM_PARAMS.stft;
     const windowSize = sanitizeWindowSize(stft.windowSize);
     const overlapPercent = sanitizeInt(stft.overlapPercent, DEFAULT_TRANSFORM_PARAMS.stft.overlapPercent, 0, 95);
     const windowType = STFT_WINDOW_TYPES.indexOf(stft.windowType) !== -1 ? stft.windowType : "hann";
@@ -263,9 +291,8 @@
     };
   }
 
-  function getMelParams(sampleRate) {
-    ensureTransformParamState();
-    const mel = state.transformParams.mel;
+  function sanitizeMelParams(melSource, sampleRate) {
+    const mel = melSource || DEFAULT_TRANSFORM_PARAMS.mel;
     const nyquist = sampleRate / 2;
     const minHz = sanitizeFloat(mel.minHz, DEFAULT_TRANSFORM_PARAMS.mel.minHz, 0, Math.max(0, nyquist - 2));
     const maxHz = sanitizeFloat(
@@ -283,24 +310,143 @@
     };
   }
 
-  function getMfccParams(maxCoeff) {
-    ensureTransformParamState();
+  function sanitizeMfccParams(mfccSource, maxCoeff) {
     const upper = Math.max(2, maxCoeff);
+    const source = mfccSource || DEFAULT_TRANSFORM_PARAMS.mfcc;
     return {
-      coeffs: sanitizeInt(state.transformParams.mfcc.coeffs, DEFAULT_TRANSFORM_PARAMS.mfcc.coeffs, 2, upper)
+      coeffs: sanitizeInt(source.coeffs, DEFAULT_TRANSFORM_PARAMS.mfcc.coeffs, 2, upper)
     };
   }
 
-  function getDctParams(maxCoeff) {
-    ensureTransformParamState();
+  function sanitizeDctParams(dctSource, maxCoeff) {
     const upper = Math.max(2, maxCoeff);
+    const source = dctSource || DEFAULT_TRANSFORM_PARAMS.dct;
     return {
-      coeffs: sanitizeInt(state.transformParams.dct.coeffs, DEFAULT_TRANSFORM_PARAMS.dct.coeffs, 2, upper)
+      coeffs: sanitizeInt(source.coeffs, DEFAULT_TRANSFORM_PARAMS.dct.coeffs, 2, upper)
     };
+  }
+
+  function getDefaultStftParams() {
+    ensureTransformParamState();
+    return sanitizeStftParams(state.transformParams.stft);
+  }
+
+  function getDefaultMelParams(sampleRate) {
+    ensureTransformParamState();
+    return sanitizeMelParams(state.transformParams.mel, sampleRate);
+  }
+
+  function getDefaultMfccParams(maxCoeff) {
+    ensureTransformParamState();
+    return sanitizeMfccParams(state.transformParams.mfcc, maxCoeff);
+  }
+
+  function getDefaultDctParams(maxCoeff) {
+    ensureTransformParamState();
+    return sanitizeDctParams(state.transformParams.dct, maxCoeff);
+  }
+
+  function cloneParams(source) {
+    return JSON.parse(JSON.stringify(source));
+  }
+
+  function createDefaultParamsForKind(kind) {
+    ensureTransformParamState();
+    const defaults = state.transformParams || DEFAULT_TRANSFORM_PARAMS;
+
+    if (kind === "magnitude_spectrogram" || kind === "phase_spectrogram" || kind === "stft") {
+      return {
+        stft: cloneParams(defaults.stft)
+      };
+    }
+
+    if (kind === "mel") {
+      return {
+        stft: cloneParams(defaults.stft),
+        mel: cloneParams(defaults.mel)
+      };
+    }
+
+    if (kind === "mfcc") {
+      return {
+        stft: cloneParams(defaults.stft),
+        mel: cloneParams(defaults.mel),
+        mfcc: cloneParams(defaults.mfcc)
+      };
+    }
+
+    if (kind === "dct") {
+      return {
+        stft: cloneParams(defaults.stft),
+        dct: cloneParams(defaults.dct)
+      };
+    }
+
+    if (kind === "custom_filterbank") {
+      return {
+        stft: cloneParams(defaults.stft)
+      };
+    }
+
+    return {};
+  }
+
+  function ensureStackItemParams(item) {
+    if (!item.params || typeof item.params !== "object") {
+      item.params = createDefaultParamsForKind(item.kind);
+      return;
+    }
+
+    const defaults = createDefaultParamsForKind(item.kind);
+    const sections = Object.keys(defaults);
+    for (let index = 0; index < sections.length; index += 1) {
+      const key = sections[index];
+      if (!item.params[key] || typeof item.params[key] !== "object") {
+        item.params[key] = cloneParams(defaults[key]);
+      }
+    }
+  }
+
+  function getItemStftParams(item) {
+    ensureStackItemParams(item);
+    const source = item.params.stft || state.transformParams.stft;
+    return sanitizeStftParams(source);
+  }
+
+  function getItemMelParams(item, sampleRate) {
+    ensureStackItemParams(item);
+    const source = item.params.mel || state.transformParams.mel;
+    return sanitizeMelParams(source, sampleRate);
+  }
+
+  function getItemMfccParams(item, maxCoeff) {
+    ensureStackItemParams(item);
+    const source = item.params.mfcc || state.transformParams.mfcc;
+    return sanitizeMfccParams(source, maxCoeff);
+  }
+
+  function getItemDctParams(item, maxCoeff) {
+    ensureStackItemParams(item);
+    const source = item.params.dct || state.transformParams.dct;
+    return sanitizeDctParams(source, maxCoeff);
+  }
+
+  function stftParamsToKey(params) {
+    return [
+      params.windowSize,
+      params.overlapPercent,
+      params.windowType,
+      params.maxAnalysisSeconds,
+      params.maxFrames
+    ].join("|");
+  }
+
+  function melParamsToKey(params) {
+    return [params.bands, params.minHz.toFixed(4), params.maxHz.toFixed(4)].join("|");
   }
 
   function syncTransformParamControls() {
-    const stftParams = getStftParams();
+    const stftParams = getDefaultStftParams();
 
     stftWindowSize.value = String(stftParams.windowSize);
     stftOverlapPercent.value = String(stftParams.overlapPercent);
@@ -308,13 +454,13 @@
     stftMaxAnalysisSeconds.value = String(stftParams.maxAnalysisSeconds);
     stftMaxFrames.value = String(stftParams.maxFrames);
 
-    const melParams = primaryAudio ? getMelParams(primaryAudio.sampleRate) : getMelParams(16000);
+    const melParams = primaryAudio ? getDefaultMelParams(primaryAudio.sampleRate) : getDefaultMelParams(16000);
     melBands.value = String(melParams.bands);
     melMinHz.value = String(Math.round(melParams.minHz));
     melMaxHz.value = String(Math.round(melParams.maxHz));
 
-    const mfccParams = getMfccParams(128);
-    const dctParams = getDctParams(256);
+    const mfccParams = getDefaultMfccParams(128);
+    const dctParams = getDefaultDctParams(256);
     mfccCoeffs.value = String(mfccParams.coeffs);
     dctCoeffs.value = String(dctParams.coeffs);
   }
@@ -328,9 +474,11 @@
 
   function nextStackItem() {
     const count = state.stack.length + 1;
+    const kind = "timeseries";
     return {
       id: "view-" + Date.now() + "-" + count,
-      kind: "timeseries"
+      kind,
+      params: createDefaultParamsForKind(kind)
     };
   }
 
@@ -376,7 +524,8 @@
     return kinds.map(function (kind, index) {
       return {
         id: "preset-" + seed + "-" + index,
-        kind
+        kind,
+        params: createDefaultParamsForKind(kind)
       };
     });
   }
@@ -495,6 +644,12 @@
     Object.keys(viewStateById).forEach(function (id) {
       if (!liveIds.has(id)) {
         delete viewStateById[id];
+      }
+    });
+
+    Array.from(expandedRowSettingsIds).forEach(function (id) {
+      if (!liveIds.has(id)) {
+        expandedRowSettingsIds.delete(id);
       }
     });
 
@@ -790,8 +945,7 @@
     const file = customFilterbankInput.files && customFilterbankInput.files[0] ? customFilterbankInput.files[0] : null;
     if (!file) {
       customFilterbank = null;
-      derivedCache.customFilterbank = null;
-      derivedCache.customFilterbankKey = null;
+      clearDerivedCache();
       setFilterbankStatus("Required for custom_filterbank transform. Rows are filters; columns are weights.");
       renderTransformStack();
       postState();
@@ -805,15 +959,13 @@
         fileName: file.name,
         rows
       };
-      derivedCache.customFilterbank = null;
-      derivedCache.customFilterbankKey = null;
+      clearDerivedCache();
       setFilterbankStatus("Loaded " + file.name + " with " + rows.length + " filter rows.");
       renderTransformStack();
       postState();
     } catch (error) {
       customFilterbank = null;
-      derivedCache.customFilterbank = null;
-      derivedCache.customFilterbankKey = null;
+      clearDerivedCache();
       setFilterbankStatus("Invalid CSV: " + toErrorText(error));
       renderTransformStack();
       postState();
@@ -905,16 +1057,17 @@
     return out;
   }
 
-  function ensureStft() {
+  function ensureStft(item) {
     if (!primaryAudio) {
       throw new Error("Select an audio file first.");
     }
 
-    if (derivedCache.stft) {
-      return derivedCache.stft;
+    const stftParams = getItemStftParams(item);
+    const stftKey = stftParamsToKey(stftParams);
+    if (derivedCache.stftByKey[stftKey]) {
+      return derivedCache.stftByKey[stftKey];
     }
 
-    const stftParams = getStftParams();
     const maxSamples = Math.floor(primaryAudio.sampleRate * stftParams.maxAnalysisSeconds);
     const analysisSamples =
       primaryAudio.samples.length <= maxSamples
@@ -929,9 +1082,10 @@
       stftParams.maxFrames,
       stftParams.windowType
     );
+    stft.cacheKey = stftKey;
     stft.overlapPercent = stftParams.overlapPercent;
     stft.windowType = stftParams.windowType;
-    derivedCache.stft = stft;
+    derivedCache.stftByKey[stftKey] = stft;
     return stft;
   }
 
@@ -1078,13 +1232,14 @@
     return reversed;
   }
 
-  function ensureMel() {
-    if (derivedCache.mel) {
-      return derivedCache.mel;
+  function ensureMel(item) {
+    const stft = ensureStft(item);
+    const melParams = getItemMelParams(item, stft.sampleRate);
+    const melKey = stft.cacheKey + "::" + melParamsToKey(melParams);
+    if (derivedCache.melByKey[melKey]) {
+      return derivedCache.melByKey[melKey];
     }
 
-    const stft = ensureStft();
-    const melParams = getMelParams(stft.sampleRate);
     const filterbank = createMelFilterbank(
       stft.sampleRate,
       stft.fftSize,
@@ -1094,7 +1249,8 @@
     );
     const melMatrix = applyFilterbank(stft.powerFrames, filterbank);
 
-    derivedCache.mel = {
+    const melResult = {
+      cacheKey: melKey,
       matrix: melMatrix,
       bands: melParams.bands,
       minHz: melParams.minHz,
@@ -1102,7 +1258,8 @@
       durationSeconds: stft.durationSeconds
     };
 
-    return derivedCache.mel;
+    derivedCache.melByKey[melKey] = melResult;
+    return melResult;
   }
 
   function createMelFilterbank(sampleRate, fftSize, melBands, minHz, maxHz) {
@@ -1180,66 +1337,71 @@
     return output;
   }
 
-  function ensureMfcc() {
-    if (derivedCache.mfcc) {
-      return derivedCache.mfcc;
+  function ensureMfcc(item) {
+    const mel = ensureMel(item);
+    const mfccParams = getItemMfccParams(item, mel.bands);
+    const mfccKey = mel.cacheKey + "::" + mfccParams.coeffs;
+    if (derivedCache.mfccByKey[mfccKey]) {
+      return derivedCache.mfccByKey[mfccKey];
     }
 
-    const mel = ensureMel();
-    const mfccParams = getMfccParams(mel.bands);
     const mfccMatrix = dctRows(mel.matrix, mfccParams.coeffs);
 
-    derivedCache.mfcc = {
+    const mfccResult = {
       matrix: mfccMatrix,
       coeffs: mfccParams.coeffs,
       durationSeconds: mel.durationSeconds
     };
 
-    return derivedCache.mfcc;
+    derivedCache.mfccByKey[mfccKey] = mfccResult;
+    return mfccResult;
   }
 
-  function ensureDct() {
-    if (derivedCache.dct) {
-      return derivedCache.dct;
+  function ensureDct(item) {
+    const stft = ensureStft(item);
+    const dctParams = getItemDctParams(item, stft.binCount);
+    const dctKey = stft.cacheKey + "::" + dctParams.coeffs;
+    if (derivedCache.dctByKey[dctKey]) {
+      return derivedCache.dctByKey[dctKey];
     }
 
-    const stft = ensureStft();
-    const dctParams = getDctParams(stft.binCount);
     const dctMatrix = dctRows(stft.logMagnitudeFrames, dctParams.coeffs);
 
-    derivedCache.dct = {
+    const dctResult = {
       matrix: dctMatrix,
       coeffs: dctParams.coeffs,
       durationSeconds: stft.durationSeconds
     };
 
-    return derivedCache.dct;
+    derivedCache.dctByKey[dctKey] = dctResult;
+    return dctResult;
   }
 
-  function ensureCustomFilterbank() {
+  function ensureCustomFilterbank(item) {
     if (!customFilterbank) {
       throw new Error("Upload a custom filterbank CSV first.");
     }
 
-    const stft = ensureStft();
-    const key = customFilterbank.fileName + "::" + stft.binCount;
+    const stft = ensureStft(item);
+    const key = customFilterbank.fileName + "::" + stft.cacheKey + "::" + stft.binCount;
 
-    if (derivedCache.customFilterbank && derivedCache.customFilterbankKey === key) {
-      return derivedCache.customFilterbank;
+    if (derivedCache.customFilterbankByKey[key]) {
+      return derivedCache.customFilterbankByKey[key];
     }
 
     const normalized = buildNormalizedFilterbank(customFilterbank.rows, stft.binCount);
     const matrix = applyFilterbank(stft.powerFrames, normalized);
 
-    derivedCache.customFilterbank = {
+    const customResult = {
       matrix,
       filters: normalized.length,
       sourceName: customFilterbank.fileName,
       durationSeconds: stft.durationSeconds
     };
-    derivedCache.customFilterbankKey = key;
 
-    return derivedCache.customFilterbank;
+    derivedCache.customFilterbankByKey[key] = customResult;
+
+    return customResult;
   }
 
   function dctRows(matrix, coeffCount) {
@@ -1267,7 +1429,8 @@
     return out;
   }
 
-  function transformMetaLabel(kind) {
+  function transformMetaLabel(item) {
+    const kind = item.kind;
     if (!primaryAudio) {
       return "Awaiting audio input";
     }
@@ -1277,7 +1440,7 @@
         return "Raw waveform";
       case "stft":
       case "magnitude_spectrogram": {
-        const stft = ensureStft();
+        const stft = ensureStft(item);
         return (
           stft.frameCount +
           " frames x " +
@@ -1290,7 +1453,7 @@
         );
       }
       case "phase_spectrogram": {
-        const stft = ensureStft();
+        const stft = ensureStft(item);
         return (
           stft.frameCount +
           " frames x " +
@@ -1303,7 +1466,7 @@
         );
       }
       case "mel": {
-        const mel = ensureMel();
+        const mel = ensureMel(item);
         return (
           mel.bands +
           " mel bands | " +
@@ -1314,11 +1477,11 @@
         );
       }
       case "mfcc": {
-        const mfcc = ensureMfcc();
+        const mfcc = ensureMfcc(item);
         return mfcc.coeffs + " cepstral coefficients";
       }
       case "dct": {
-        const dct = ensureDct();
+        const dct = ensureDct(item);
         return dct.coeffs + " DCT coefficients";
       }
       case "custom_filterbank":
@@ -1328,7 +1491,8 @@
     }
   }
 
-  function buildTransformRenderSpec(kind) {
+  function buildTransformRenderSpec(item) {
+    const kind = item.kind;
     if (!primaryAudio) {
       throw new Error("Load a primary audio clip to render this view.");
     }
@@ -1350,7 +1514,7 @@
     }
 
     if (kind === "stft" || kind === "magnitude_spectrogram") {
-      const stft = ensureStft();
+      const stft = ensureStft(item);
       return {
         type: "matrix",
         domainLength: stft.logMagnitudeFrames.length,
@@ -1375,7 +1539,7 @@
     }
 
     if (kind === "phase_spectrogram") {
-      const stft = ensureStft();
+      const stft = ensureStft(item);
       return {
         type: "matrix",
         domainLength: stft.phaseFrames.length,
@@ -1396,7 +1560,7 @@
     }
 
     if (kind === "mel") {
-      const mel = ensureMel();
+      const mel = ensureMel(item);
       return {
         type: "matrix",
         domainLength: mel.matrix.length,
@@ -1414,7 +1578,7 @@
     }
 
     if (kind === "mfcc") {
-      const mfcc = ensureMfcc();
+      const mfcc = ensureMfcc(item);
       return {
         type: "matrix",
         domainLength: mfcc.matrix.length,
@@ -1425,7 +1589,7 @@
     }
 
     if (kind === "dct") {
-      const dct = ensureDct();
+      const dct = ensureDct(item);
       return {
         type: "matrix",
         domainLength: dct.matrix.length,
@@ -1436,7 +1600,7 @@
     }
 
     if (kind === "custom_filterbank") {
-      const custom = ensureCustomFilterbank();
+      const custom = ensureCustomFilterbank(item);
       return {
         type: "matrix",
         domainLength: custom.matrix.length,
@@ -2167,10 +2331,190 @@
     };
   }
 
+  function rowUsesStft(kind) {
+    return (
+      kind === "stft" ||
+      kind === "magnitude_spectrogram" ||
+      kind === "phase_spectrogram" ||
+      kind === "mel" ||
+      kind === "mfcc" ||
+      kind === "dct" ||
+      kind === "custom_filterbank"
+    );
+  }
+
+  function rowUsesMel(kind) {
+    return kind === "mel" || kind === "mfcc";
+  }
+
+  function onRowParamsChanged() {
+    clearDerivedCache();
+    renderTransformStack();
+    postState();
+  }
+
+  function makeRowSettingLabel(text) {
+    const label = document.createElement("label");
+    label.className = "stack-row-settings-label";
+    label.textContent = text;
+    return label;
+  }
+
+  function addRowSettingNumber(container, text, value, min, max, step, onChange) {
+    const label = makeRowSettingLabel(text);
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = String(min);
+    input.max = String(max);
+    input.step = String(step);
+    input.value = String(value);
+    input.className = "stack-row-settings-input";
+    input.addEventListener("change", function () {
+      onChange(Number(input.value));
+    });
+    label.appendChild(input);
+    container.appendChild(label);
+  }
+
+  function addRowSettingSelect(container, text, value, options, onChange) {
+    const label = makeRowSettingLabel(text);
+    const select = document.createElement("select");
+    select.className = "stack-row-settings-input";
+
+    options.forEach(function (optionDef) {
+      const option = document.createElement("option");
+      option.value = String(optionDef.value);
+      option.textContent = optionDef.label;
+      if (String(optionDef.value) === String(value)) {
+        option.selected = true;
+      }
+      select.appendChild(option);
+    });
+
+    select.addEventListener("change", function () {
+      onChange(select.value);
+    });
+
+    label.appendChild(select);
+    container.appendChild(label);
+  }
+
+  function buildRowSettingsPanel(item) {
+    ensureStackItemParams(item);
+
+    const panel = document.createElement("div");
+    panel.className = "stack-row-settings";
+
+    if (!rowUsesStft(item.kind) && item.kind !== "mfcc" && item.kind !== "dct") {
+      const note = document.createElement("div");
+      note.className = "stack-row-settings-note";
+      note.textContent =
+        item.kind === "timeseries"
+          ? "No per-row transform hyperparameters for timeseries."
+          : "No extra settings for this row.";
+      panel.appendChild(note);
+      return panel;
+    }
+
+    if (rowUsesStft(item.kind)) {
+      const stftParams = getItemStftParams(item);
+      addRowSettingSelect(
+        panel,
+        "Window size",
+        stftParams.windowSize,
+        STFT_WINDOW_SIZE_OPTIONS.map(function (size) {
+          return { value: size, label: String(size) };
+        }),
+        function (nextValue) {
+          item.params.stft.windowSize = Number(nextValue);
+          onRowParamsChanged();
+        }
+      );
+      addRowSettingNumber(panel, "Overlap (%)", stftParams.overlapPercent, 0, 95, 1, function (nextValue) {
+        item.params.stft.overlapPercent = nextValue;
+        onRowParamsChanged();
+      });
+      addRowSettingSelect(
+        panel,
+        "Window type",
+        stftParams.windowType,
+        STFT_WINDOW_TYPES.map(function (windowType) {
+          return {
+            value: windowType,
+            label: windowType
+          };
+        }),
+        function (nextValue) {
+          item.params.stft.windowType = nextValue;
+          onRowParamsChanged();
+        }
+      );
+      addRowSettingNumber(
+        panel,
+        "Max analysis seconds",
+        stftParams.maxAnalysisSeconds,
+        1,
+        600,
+        1,
+        function (nextValue) {
+          item.params.stft.maxAnalysisSeconds = nextValue;
+          onRowParamsChanged();
+        }
+      );
+      addRowSettingNumber(panel, "Max frames", stftParams.maxFrames, 32, 5000, 1, function (nextValue) {
+        item.params.stft.maxFrames = nextValue;
+        onRowParamsChanged();
+      });
+    }
+
+    if (rowUsesMel(item.kind)) {
+      const melParams = getItemMelParams(item, primaryAudio ? primaryAudio.sampleRate : 16000);
+      addRowSettingNumber(panel, "Mel bands", melParams.bands, 8, 256, 1, function (nextValue) {
+        item.params.mel.bands = nextValue;
+        onRowParamsChanged();
+      });
+      addRowSettingNumber(panel, "Mel min Hz", Math.round(melParams.minHz), 0, 20000, 1, function (nextValue) {
+        item.params.mel.minHz = nextValue;
+        onRowParamsChanged();
+      });
+      addRowSettingNumber(panel, "Mel max Hz", Math.round(melParams.maxHz), 1, 24000, 1, function (nextValue) {
+        item.params.mel.maxHz = nextValue;
+        onRowParamsChanged();
+      });
+    }
+
+    if (item.kind === "mfcc") {
+      const mfccParams = getItemMfccParams(item, 128);
+      addRowSettingNumber(panel, "MFCC coeffs", mfccParams.coeffs, 2, 128, 1, function (nextValue) {
+        item.params.mfcc.coeffs = nextValue;
+        onRowParamsChanged();
+      });
+    }
+
+    if (item.kind === "dct") {
+      const dctParams = getItemDctParams(item, 256);
+      addRowSettingNumber(panel, "DCT coeffs", dctParams.coeffs, 2, 256, 1, function (nextValue) {
+        item.params.dct.coeffs = nextValue;
+        onRowParamsChanged();
+      });
+    }
+
+    if (item.kind === "custom_filterbank") {
+      const note = document.createElement("div");
+      note.className = "stack-row-settings-note";
+      note.textContent = "Custom filterbank uses STFT settings above plus uploaded CSV weights.";
+      panel.appendChild(note);
+    }
+
+    return panel;
+  }
+
   function renderStackControls() {
     stackList.innerHTML = "";
 
     state.stack.forEach(function (item, index) {
+      ensureStackItemParams(item);
+
       const row = document.createElement("li");
       row.className = "stack-item";
       row.draggable = true;
@@ -2235,8 +2579,26 @@
 
       transformSelect.addEventListener("change", function () {
         item.kind = transformSelect.value;
+        item.params = createDefaultParamsForKind(item.kind);
+        clearDerivedCache();
+        renderStackControls();
         renderTransformStack();
         postState();
+      });
+
+      const settingsButton = document.createElement("button");
+      settingsButton.type = "button";
+      settingsButton.className = "row-settings-button";
+      settingsButton.textContent = expandedRowSettingsIds.has(item.id) ? "Hide Settings" : "Settings";
+      settingsButton.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (expandedRowSettingsIds.has(item.id)) {
+          expandedRowSettingsIds.delete(item.id);
+        } else {
+          expandedRowSettingsIds.add(item.id);
+        }
+        renderStackControls();
       });
 
       const removeButton = document.createElement("button");
@@ -2245,6 +2607,7 @@
       removeButton.textContent = "Remove";
       removeButton.addEventListener("click", function () {
         state.stack.splice(index, 1);
+        expandedRowSettingsIds.delete(item.id);
         renderStackControls();
         renderTransformStack();
         postState();
@@ -2252,7 +2615,13 @@
 
       row.appendChild(handle);
       row.appendChild(transformSelect);
+      row.appendChild(settingsButton);
       row.appendChild(removeButton);
+
+      if (expandedRowSettingsIds.has(item.id)) {
+        const settingsPanel = buildRowSettingsPanel(item);
+        row.appendChild(settingsPanel);
+      }
       stackList.appendChild(row);
     });
   }
@@ -2286,7 +2655,7 @@
       meta.className = "transform-card-meta";
 
       try {
-        meta.textContent = transformMetaLabel(item.kind);
+        meta.textContent = transformMetaLabel(item);
       } catch {
         meta.textContent = "Awaiting transform data";
       }
@@ -2298,7 +2667,7 @@
       body.className = "transform-card-body";
 
       try {
-        const renderSpec = buildTransformRenderSpec(item.kind);
+        const renderSpec = buildTransformRenderSpec(item);
 
         const toolbar = buildTransformToolbar(item, renderSpec);
         body.appendChild(toolbar);

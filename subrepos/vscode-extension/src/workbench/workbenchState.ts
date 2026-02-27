@@ -18,6 +18,26 @@ export type StftWindowType = "hann" | "hamming" | "blackman" | "rectangular";
 export interface TransformViewItem {
   id: string;
   kind: TransformViewKind;
+  params?: {
+    stft?: {
+      windowSize: number;
+      overlapPercent: number;
+      windowType: StftWindowType;
+      maxAnalysisSeconds: number;
+      maxFrames: number;
+    };
+    mel?: {
+      bands: number;
+      minHz: number;
+      maxHz: number;
+    };
+    mfcc?: {
+      coeffs: number;
+    };
+    dct?: {
+      coeffs: number;
+    };
+  };
 }
 
 export interface WorkbenchState {
@@ -78,9 +98,38 @@ export interface WorkbenchState {
 export function createDefaultWorkbenchState(): WorkbenchState {
   return {
     stack: [
-      { id: "view-1", kind: "timeseries" },
-      { id: "view-2", kind: "magnitude_spectrogram" },
-      { id: "view-3", kind: "mel" }
+      { id: "view-1", kind: "timeseries", params: {} },
+      {
+        id: "view-2",
+        kind: "magnitude_spectrogram",
+        params: {
+          stft: {
+            windowSize: 512,
+            overlapPercent: 75,
+            windowType: "hann",
+            maxAnalysisSeconds: 20,
+            maxFrames: 420
+          }
+        }
+      },
+      {
+        id: "view-3",
+        kind: "mel",
+        params: {
+          stft: {
+            windowSize: 512,
+            overlapPercent: 75,
+            windowType: "hann",
+            maxAnalysisSeconds: 20,
+            maxFrames: 420
+          },
+          mel: {
+            bands: 40,
+            minHz: 0,
+            maxHz: 8000
+          }
+        }
+      }
     ],
     overlay: {
       enabled: false,

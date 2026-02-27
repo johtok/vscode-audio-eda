@@ -52,6 +52,7 @@ export function buildWorkbenchHtml(webview: vscode.Webview, extensionUri: vscode
         </div>
         <ul id="stack-list" class="stack-list"></ul>
         <p class="hint">Reorder by dragging rows with the <strong>|||</strong> handle.</p>
+        <p class="hint">Each row has its own <strong>Settings</strong> panel for transform-specific hyperparameters.</p>
         <div id="transform-render-stack" class="render-stack"></div>
       </section>
 
@@ -81,7 +82,7 @@ export function buildWorkbenchHtml(webview: vscode.Webview, extensionUri: vscode
         <label class="row" for="comparison-audio">Second audio clip</label>
         <input id="comparison-audio" type="file" accept=".wav,.flac,.mp3,.mpga,.mpeg,.ogg,.m4a" />
 
-        <h2>Transform Hyperparameters</h2>
+        <h2>Default Transform Hyperparameters</h2>
         <label class="row" for="stft-window-size">STFT window size</label>
         <select id="stft-window-size">
           <option value="128">128</option>

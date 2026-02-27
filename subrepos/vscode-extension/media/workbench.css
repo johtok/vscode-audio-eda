@@ -66,7 +66,7 @@ h2 {
 
 .stack-item {
   display: grid;
-  grid-template-columns: auto minmax(140px, 1fr) auto;
+  grid-template-columns: auto minmax(140px, 1fr) auto auto;
   gap: 8px;
   align-items: center;
   padding: 6px;
@@ -91,6 +91,40 @@ h2 {
 
 .drag-handle:active {
   cursor: grabbing;
+}
+
+.row-settings-button {
+  white-space: nowrap;
+}
+
+.stack-row-settings {
+  grid-column: 1 / -1;
+  margin-top: 2px;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--vscode-panel-border) 78%, #2f8aab 22%);
+  background: color-mix(in srgb, var(--vscode-editor-background) 90%, #122c3b 10%);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 6px;
+}
+
+.stack-row-settings-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.74rem;
+  color: var(--vscode-descriptionForeground);
+}
+
+.stack-row-settings-input {
+  width: 100%;
+}
+
+.stack-row-settings-note {
+  grid-column: 1 / -1;
+  font-size: 0.76rem;
+  color: var(--vscode-descriptionForeground);
 }
 
 button,
