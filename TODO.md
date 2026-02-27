@@ -72,6 +72,8 @@ Build a developer-friendly audio ML workspace centered on:
 - [ ] Duplicate / near-duplicate detection
 - [ ] Outlier detection on features/embeddings
 - [ ] Annotation QA checks (missing labels, bad timestamps, overlap issues)
+- [ ] r-Clustering pipeline for representation-aware clustering and stability diagnostics
+- [ ] Symbolic Pattern Forest pipeline for labeled time-series pattern mining/classification
 
 ## UX / Product Backlog (Extension)
 
@@ -99,3 +101,5 @@ Build a developer-friendly audio ML workspace centered on:
 4. `M3`: Waveform/spectrogram webview + file inspector
 5. `M4`: Batch EDA report generation + export
 6. `M5`: ML-oriented diagnostics (class balance/outliers/embeddings)
+7. `M6`: r-Clustering integration (feature export, clustering diagnostics, UI hooks)
+8. `M7`: Symbolic Pattern Forest integration (symbolic transform + pattern dashboards)

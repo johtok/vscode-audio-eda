@@ -1324,6 +1324,32 @@
     );
   }
 
+  function getClasswiseMetricsCacheKeyPart() {
+    if (!state.overlay.enabled) {
+      return "overlay:off";
+    }
+
+    if (!overlayParsed || !Array.isArray(overlayParsed.intervals)) {
+      return "overlay:on:none";
+    }
+
+    const intervalSignature =
+      typeof overlayParsed.signature === "string"
+        ? overlayParsed.signature
+        : buildIntervalSignature(overlayParsed.intervals);
+
+    return (
+      "overlay:on:" +
+      (overlayParsed.mode || state.overlay.mode || "unknown") +
+      ":" +
+      overlayParsed.activeRows +
+      ":" +
+      overlayParsed.totalRows +
+      ":" +
+      intervalSignature
+    );
+  }
+
   function sampleForDistribution(values, maxCount) {
     if (!values || values.length === 0) {
       return [];
@@ -2242,6 +2268,202 @@
     };
   }
 
+  function buildSampleRangesFromIntervals(intervals, sampleRate, sampleCount) {
+    if (!Array.isArray(intervals) || intervals.length === 0 || sampleRate <= 0 || sampleCount <= 0) {
+      return [];
+    }
+
+    const ranges = [];
+    for (let index = 0; index < intervals.length; index += 1) {
+      const interval = intervals[index];
+      if (!interval || !Number.isFinite(interval.startSec) || !Number.isFinite(interval.endSec)) {
+        continue;
+      }
+
+      const start = clamp(Math.floor(Math.min(interval.startSec, interval.endSec) * sampleRate), 0, sampleCount);
+      const end = clamp(Math.ceil(Math.max(interval.startSec, interval.endSec) * sampleRate), 0, sampleCount);
+      if (end <= start) {
+        continue;
+      }
+
+      const last = ranges.length > 0 ? ranges[ranges.length - 1] : null;
+      if (last && start <= last.end) {
+        last.end = Math.max(last.end, end);
+      } else {
+        ranges.push({ start, end });
+      }
+    }
+
+    return ranges;
+  }
+
+  function invertSampleRanges(ranges, sampleCount) {
+    if (sampleCount <= 0) {
+      return [];
+    }
+
+    if (!Array.isArray(ranges) || ranges.length === 0) {
+      return [{ start: 0, end: sampleCount }];
+    }
+
+    const complement = [];
+    let cursor = 0;
+    for (let index = 0; index < ranges.length; index += 1) {
+      const range = ranges[index];
+      const start = clamp(range.start, 0, sampleCount);
+      const end = clamp(range.end, start, sampleCount);
+      if (start > cursor) {
+        complement.push({ start: cursor, end: start });
+      }
+      cursor = Math.max(cursor, end);
+    }
+
+    if (cursor < sampleCount) {
+      complement.push({ start: cursor, end: sampleCount });
+    }
+
+    return complement;
+  }
+
+  function summarizeSamplesByRanges(samples, ranges) {
+    if (!samples || samples.length === 0 || !Array.isArray(ranges) || ranges.length === 0) {
+      return null;
+    }
+
+    let min = Number.POSITIVE_INFINITY;
+    let max = Number.NEGATIVE_INFINITY;
+    let sum = 0;
+    let sumSquares = 0;
+    let clippingCount = 0;
+    let zeroCrossings = 0;
+    let sampleCount = 0;
+
+    for (let rangeIndex = 0; rangeIndex < ranges.length; rangeIndex += 1) {
+      const range = ranges[rangeIndex];
+      const start = clamp(range.start, 0, samples.length);
+      const end = clamp(range.end, start, samples.length);
+      let previousSign = 0;
+
+      for (let index = start; index < end; index += 1) {
+        const value = samples[index];
+        if (value < min) {
+          min = value;
+        }
+        if (value > max) {
+          max = value;
+        }
+        sum += value;
+        sumSquares += value * value;
+        if (Math.abs(value) >= 0.999) {
+          clippingCount += 1;
+        }
+
+        const sign = value > 0 ? 1 : value < 0 ? -1 : 0;
+        if (previousSign !== 0 && sign !== 0 && sign !== previousSign) {
+          zeroCrossings += 1;
+        }
+        if (sign !== 0) {
+          previousSign = sign;
+        }
+        sampleCount += 1;
+      }
+    }
+
+    if (sampleCount === 0) {
+      return null;
+    }
+
+    const mean = sum / sampleCount;
+    const meanPower = sumSquares / sampleCount;
+    const variance = Math.max(0, meanPower - mean * mean);
+    const std = Math.sqrt(variance);
+    const rms = Math.sqrt(meanPower);
+    const peakAbs = Math.max(Math.abs(min), Math.abs(max));
+
+    return {
+      sampleCount,
+      mean,
+      rms,
+      std,
+      variance,
+      min,
+      max,
+      peakAbs,
+      meanPower,
+      meanPowerDb: 10 * Math.log10(meanPower + 1e-12),
+      clippingRatio: clippingCount / sampleCount,
+      zcr: zeroCrossings / Math.max(1, sampleCount - 1)
+    };
+  }
+
+  function summarizeClasswiseFromOverlay(samples, sampleRate, sampleCount) {
+    if (!state.overlay.enabled) {
+      return {
+        available: false,
+        reason: "Enable Activation Overlay and load CSV labels to compute classwise metrics."
+      };
+    }
+
+    if (!overlayParsed || !Array.isArray(overlayParsed.intervals)) {
+      return {
+        available: false,
+        reason: "Load a valid overlay CSV (flag or timestamped) to derive active/inactive classes."
+      };
+    }
+
+    const activeRanges = buildSampleRangesFromIntervals(overlayParsed.intervals, sampleRate, sampleCount);
+    const inactiveRanges = invertSampleRanges(activeRanges, sampleCount);
+    const activeStats = summarizeSamplesByRanges(samples, activeRanges);
+    const inactiveStats = summarizeSamplesByRanges(samples, inactiveRanges);
+
+    if (!activeStats) {
+      return {
+        available: false,
+        reason: "Overlay intervals contain no active samples in the current clip."
+      };
+    }
+
+    if (!inactiveStats) {
+      return {
+        available: false,
+        reason: "Overlay covers the full clip; no inactive class remains for comparison."
+      };
+    }
+
+    const total = Math.max(1, sampleCount);
+    const activeCoverageRatio = activeStats.sampleCount / total;
+    const inactiveCoverageRatio = inactiveStats.sampleCount / total;
+    const rmsDeltaDb = 20 * Math.log10((activeStats.rms + 1e-12) / (inactiveStats.rms + 1e-12));
+    const meanPowerDeltaDb = activeStats.meanPowerDb - inactiveStats.meanPowerDb;
+
+    return {
+      available: true,
+      note:
+        "Classes are derived from overlay labels: active=flagged regions, inactive=non-flagged complement.",
+      source: {
+        mode: overlayParsed.mode,
+        intervals: overlayParsed.intervals.length,
+        activeRows: overlayParsed.activeRows,
+        totalRows: overlayParsed.totalRows
+      },
+      active: Object.assign({}, activeStats, {
+        durationSeconds: activeStats.sampleCount / Math.max(1, sampleRate),
+        coverageRatio: activeCoverageRatio
+      }),
+      inactive: Object.assign({}, inactiveStats, {
+        durationSeconds: inactiveStats.sampleCount / Math.max(1, sampleRate),
+        coverageRatio: inactiveCoverageRatio
+      }),
+      deltas: {
+        rmsDb: rmsDeltaDb,
+        meanPowerDb: meanPowerDeltaDb,
+        peakAbs: activeStats.peakAbs - inactiveStats.peakAbs,
+        clippingRatio: activeStats.clippingRatio - inactiveStats.clippingRatio,
+        zcr: activeStats.zcr - inactiveStats.zcr
+      }
+    };
+  }
+
   function computeMetricsReport(audioData) {
     if (!audioData || !audioData.samples || audioData.samples.length === 0) {
       return null;
@@ -2425,6 +2647,7 @@
     );
     const spectral = summarizeSpectralFeatures(metricsStft);
     const melMfcc = summarizeMelMfccFeatures(metricsStft);
+    const classwise = summarizeClasswiseFromOverlay(samples, sampleRate, sampleCount);
 
     const standards = {
       leqDbfs: meanPowerDb,
@@ -2440,8 +2663,7 @@
         "Unavailable without clean reference clip (SI-SDR/STOI/PESQ/POLQA require reference).",
       roomAcoustics:
         "Unavailable without RIR / room measurement chain (RT/EDT/C50/D50/STI/SII).",
-      classwise:
-        "Unavailable without class labels (planned Phase 8)."
+      classwise: classwise.available ? classwise.note : classwise.reason
     };
 
     return {
@@ -2555,6 +2777,7 @@
         },
         shortTimeAutocorrelation: shortTimeAuto
       },
+      classwise: classwise.available ? classwise : null,
       availability
     };
   }
@@ -2566,6 +2789,7 @@
     }
 
     const histogramConfig = getMetricsHistogramConfig();
+    const classwiseKey = getClasswiseMetricsCacheKeyPart();
     const cacheKey =
       metricsAudioKey(analysisAudio) +
       "::hist::" +
@@ -2573,7 +2797,9 @@
       "::" +
       histogramConfig.min.toFixed(6) +
       "::" +
-      histogramConfig.max.toFixed(6);
+      histogramConfig.max.toFixed(6) +
+      "::classwise::" +
+      classwiseKey;
     if (metricsCache.cacheKey === cacheKey && metricsCache.report) {
       return metricsCache.report;
     }
@@ -2775,8 +3001,9 @@
       output.sections.distributional = report.distributional;
     }
     if (state.metrics.classwise) {
-      output.sections.classwise = {
-        note: "Classwise metrics require label metadata (Phase 8)."
+      output.sections.classwise = report.classwise || {
+        available: false,
+        reason: report.availability.classwise
       };
     }
 
@@ -2861,6 +3088,7 @@
     const report = getPrimaryMetricsReport();
     const analysisAudio = getSingleChannelAnalysisAudio();
     const histogramConfig = getMetricsHistogramConfig();
+    const classwiseKey = getClasswiseMetricsCacheKeyPart();
     const widthSignature = Math.round(metricsHistogramCanvas.clientWidth || 0);
     const signature =
       (report ? metricsAudioKey(analysisAudio) : "none") +
@@ -2880,7 +3108,9 @@
       "|" +
       histogramConfig.min.toFixed(6) +
       "|" +
-      histogramConfig.max.toFixed(6);
+      histogramConfig.max.toFixed(6) +
+      "|" +
+      classwiseKey;
 
     if (signature === metricsRenderSignature) {
       return;
@@ -3154,11 +3384,72 @@
     }
 
     if (state.metrics.classwise) {
-      metricsContent.appendChild(
-        createMetricsGroup("Classwise Metrics", [
-          ["Status", report.availability.classwise]
-        ])
-      );
+      if (report.classwise && report.classwise.available) {
+        const sourceRows = [
+          ["Source mode", report.classwise.source.mode],
+          ["Intervals", String(report.classwise.source.intervals)],
+          [
+            "Active rows",
+            String(report.classwise.source.activeRows) +
+              " / " +
+              String(report.classwise.source.totalRows)
+          ],
+          ["Active coverage", formatMetricPercent(report.classwise.active.coverageRatio)],
+          ["Inactive coverage", formatMetricPercent(report.classwise.inactive.coverageRatio)],
+          ["Note", report.classwise.note]
+        ];
+        metricsContent.appendChild(createMetricsGroup("Classwise Metrics", sourceRows));
+
+        const activeRows = [
+          ["Duration", formatMetricNumber(report.classwise.active.durationSeconds, 3) + " s"],
+          ["Samples", String(report.classwise.active.sampleCount)],
+          ["Mean", formatMetricNumber(report.classwise.active.mean, 6)],
+          ["RMS", formatMetricNumber(report.classwise.active.rms, 6)],
+          ["Std", formatMetricNumber(report.classwise.active.std, 6)],
+          ["Peak |x|", formatMetricNumber(report.classwise.active.peakAbs, 6)],
+          ["Mean power", formatMetricNumber(report.classwise.active.meanPower, 8)],
+          ["Mean power (dB)", formatMetricNumber(report.classwise.active.meanPowerDb, 2) + " dB"],
+          ["Clipping ratio", formatMetricPercent(report.classwise.active.clippingRatio)],
+          ["ZCR", formatMetricNumber(report.classwise.active.zcr, 6)]
+        ];
+        metricsContent.appendChild(createMetricsGroup("Classwise: Active", activeRows));
+
+        const inactiveRows = [
+          ["Duration", formatMetricNumber(report.classwise.inactive.durationSeconds, 3) + " s"],
+          ["Samples", String(report.classwise.inactive.sampleCount)],
+          ["Mean", formatMetricNumber(report.classwise.inactive.mean, 6)],
+          ["RMS", formatMetricNumber(report.classwise.inactive.rms, 6)],
+          ["Std", formatMetricNumber(report.classwise.inactive.std, 6)],
+          ["Peak |x|", formatMetricNumber(report.classwise.inactive.peakAbs, 6)],
+          ["Mean power", formatMetricNumber(report.classwise.inactive.meanPower, 8)],
+          [
+            "Mean power (dB)",
+            formatMetricNumber(report.classwise.inactive.meanPowerDb, 2) + " dB"
+          ],
+          ["Clipping ratio", formatMetricPercent(report.classwise.inactive.clippingRatio)],
+          ["ZCR", formatMetricNumber(report.classwise.inactive.zcr, 6)]
+        ];
+        metricsContent.appendChild(createMetricsGroup("Classwise: Inactive", inactiveRows));
+
+        const deltaRows = [
+          ["RMS delta (active-inactive)", formatMetricNumber(report.classwise.deltas.rmsDb, 2) + " dB"],
+          [
+            "Mean power delta",
+            formatMetricNumber(report.classwise.deltas.meanPowerDb, 2) + " dB"
+          ],
+          ["Peak |x| delta", formatMetricNumber(report.classwise.deltas.peakAbs, 6)],
+          [
+            "Clipping ratio delta",
+            formatMetricPercent(report.classwise.deltas.clippingRatio)
+          ],
+          ["ZCR delta", formatMetricNumber(report.classwise.deltas.zcr, 6)]
+        ];
+        metricsContent.appendChild(createMetricsGroup("Classwise Contrast", deltaRows));
+      } else {
+        metricsContent.appendChild(
+          createMetricsGroup("Classwise Metrics", [["Status", report.availability.classwise]])
+        );
+      }
     }
 
     const featureRows = [];
@@ -3319,6 +3610,25 @@
     return merged;
   }
 
+  function buildIntervalSignature(intervals) {
+    if (!Array.isArray(intervals) || intervals.length === 0) {
+      return "0:0";
+    }
+
+    let hash = 2166136261 >>> 0;
+    for (let index = 0; index < intervals.length; index += 1) {
+      const interval = intervals[index];
+      const start = Number.isFinite(interval.startSec) ? Math.round(interval.startSec * 1000) : 0;
+      const end = Number.isFinite(interval.endSec) ? Math.round(interval.endSec * 1000) : 0;
+      hash ^= start >>> 0;
+      hash = Math.imul(hash, 16777619) >>> 0;
+      hash ^= end >>> 0;
+      hash = Math.imul(hash, 16777619) >>> 0;
+    }
+
+    return intervals.length + ":" + hash.toString(16);
+  }
+
   function convertCsvTimeToSeconds(value, columnName) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) {
@@ -3434,7 +3744,8 @@
         mode,
         intervals,
         activeRows,
-        totalRows: table.rows.length
+        totalRows: table.rows.length,
+        signature: buildIntervalSignature(intervals)
       };
     }
 
@@ -3467,11 +3778,14 @@
       });
     });
 
+    const mergedIntervals = mergeIntervals(intervals);
+
     return {
       mode,
-      intervals: mergeIntervals(intervals),
+      intervals: mergedIntervals,
       activeRows,
-      totalRows: table.rows.length
+      totalRows: table.rows.length,
+      signature: buildIntervalSignature(mergedIntervals)
     };
   }
 

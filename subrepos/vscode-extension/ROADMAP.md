@@ -143,6 +143,34 @@ Delivery slices:
 2. cross-class projection comparison
 3. class-separation indicators
 
+## Phase 10: r-Clustering Analytics (Priority 10)
+
+Goal: add representation-aware clustering diagnostics inspired by r-Clustering for robust structure discovery.
+
+Reference:
+
+- https://arxiv.org/html/2305.10457
+
+Delivery slices:
+
+1. r-Clustering backend contract (inputs: feature matrix/embeddings, optional class labels)
+2. cluster stability + quality summaries (silhouette-like and representation-aware diagnostics)
+3. cluster browser panel (cluster prototypes, intra/inter-cluster distance summaries)
+
+## Phase 11: Symbolic Pattern Forest (Priority 11)
+
+Goal: add symbolic sequence mining/classification diagnostics using Symbolic Pattern Forest concepts.
+
+Reference:
+
+- https://www.ijcai.org/proceedings/2019/0406.pdf
+
+Delivery slices:
+
+1. symbolic transform pipeline (windowing, discretization, pattern extraction)
+2. pattern-forest training/evaluation hooks for labeled time series
+3. pattern importance explorer (top symbolic patterns + per-class support)
+
 ## Implementation Backbone (Cross-cutting)
 
 - Stable CLI contract with Python toolbox (`inspect`, `summarize`, `metrics`, `features`, `pca`)
