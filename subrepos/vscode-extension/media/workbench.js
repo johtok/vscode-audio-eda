@@ -22,7 +22,16 @@
   const STFT_WINDOW_SIZE_OPTIONS = [128, 256, 512, 1024, 2048, 4096];
   const STFT_WINDOW_TYPES = ["hann", "hamming", "blackman", "rectangular"];
   const STFT_MODES = ["magnitude", "phase"];
+  const COMPARISON_MODES = [
+    "none",
+    "side_by_side",
+    "overlay",
+    "side_by_side_difference",
+    "stacked",
+    "stacked_difference"
+  ];
   const DEFAULT_FLAG_OVERLAY_COLOR = "#ef4444";
+  const MAX_PERSISTED_OVERLAY_CSV_CHARS = 500000;
   const DEFAULT_TRANSFORM_PARAMS = {
     stft: {
       mode: "magnitude",
@@ -59,8 +68,14 @@
 
   const bootstrapBase = window.__AUDIO_EDA_BOOTSTRAP__ || {
     stack: [],
-    overlay: { enabled: false, mode: "flag", csvName: null, flagColor: DEFAULT_FLAG_OVERLAY_COLOR },
-    comparison: { mode: "none", secondAudioName: null },
+    overlay: {
+      enabled: false,
+      mode: "flag",
+      csvName: null,
+      csvText: null,
+      flagColor: DEFAULT_FLAG_OVERLAY_COLOR
+    },
+    comparison: { mode: "none", secondAudioName: null, offsetSeconds: 0 },
     metrics: {
       audio: true,
       speech: false,
@@ -84,6 +99,7 @@
   const bootstrap = mergeBootstrapState(bootstrapBase, persistedState);
   const state = JSON.parse(JSON.stringify(bootstrap));
   ensureOverlayState();
+  ensureComparisonState();
   ensureTransformParamState();
   normalizeLegacyTransformKinds();
   normalizeStackItems();
@@ -93,6 +109,7 @@
   const renderStackContainer = byId("transform-render-stack");
 
   const primaryAudioFileInput = byId("primary-audio-file");
+  const primaryAudioFileLocked = byId("primary-audio-file-locked");
   const primaryAudioPlayer = byId("primary-audio-player");
   const audioStatus = byId("audio-status");
   const audioLockStatus = byId("audio-lock-status");
@@ -108,6 +125,8 @@
 
   const comparisonMode = byId("comparison-mode");
   const comparisonAudio = byId("comparison-audio");
+  const comparisonOffsetSeconds = byId("comparison-offset-seconds");
+  const comparisonStatus = byId("comparison-status");
 
   const stftWindowSize = byId("stft-window-size");
   const stftOverlapPercent = byId("stft-overlap-percent");
@@ -143,10 +162,12 @@
   let primaryAudio = null;
   let primaryAudioUrl = null;
   let primaryAudioLocked = false;
+  let comparisonAudioData = null;
   let customFilterbank = null;
   let overlayParsed = null;
   let overlayStatusMessage = "";
   let derivedCache = createEmptyDerivedCache();
+  let comparisonDerivedCache = createEmptyDerivedCache();
   let resizeTick = 0;
   let selectedViewId = null;
   const expandedRowSettingsIds = new Set();
@@ -343,9 +364,14 @@
         enabled: false,
         mode: "flag",
         csvName: null,
+        csvText: null,
         flagColor: DEFAULT_FLAG_OVERLAY_COLOR
       };
       return;
+    }
+
+    if (typeof state.overlay.csvText !== "string") {
+      state.overlay.csvText = null;
     }
 
     if (typeof state.overlay.flagColor !== "string") {
@@ -353,6 +379,27 @@
     }
 
     state.overlay.flagColor = sanitizeHexColor(state.overlay.flagColor, DEFAULT_FLAG_OVERLAY_COLOR);
+  }
+
+  function ensureComparisonState() {
+    if (!state.comparison || typeof state.comparison !== "object") {
+      state.comparison = {
+        mode: "none",
+        secondAudioName: null,
+        offsetSeconds: 0
+      };
+      return;
+    }
+
+    if (!Number.isFinite(Number(state.comparison.offsetSeconds))) {
+      state.comparison.offsetSeconds = 0;
+    }
+
+    if (COMPARISON_MODES.indexOf(state.comparison.mode) === -1) {
+      state.comparison.mode = "none";
+    }
+
+    state.comparison.offsetSeconds = sanitizeFloat(state.comparison.offsetSeconds, 0, -30, 30);
   }
 
   function createEmptyDerivedCache() {
@@ -367,6 +414,7 @@
 
   function clearDerivedCache() {
     derivedCache = createEmptyDerivedCache();
+    comparisonDerivedCache = createEmptyDerivedCache();
   }
 
   function sanitizeInt(raw, fallback, min, max) {
@@ -705,6 +753,9 @@
     primaryAudioLocked = locked;
     primaryAudioFileInput.disabled = locked;
     primaryAudioFileInput.classList.toggle("is-locked", locked);
+    primaryAudioFileInput.hidden = locked;
+    primaryAudioFileLocked.hidden = !locked;
+    primaryAudioFileLocked.value = locked ? fileName || "" : "";
 
     if (locked) {
       audioLockStatus.textContent =
@@ -719,6 +770,10 @@
 
   function setFilterbankStatus(text) {
     filterbankStatus.textContent = text;
+  }
+
+  function setComparisonStatus(text) {
+    comparisonStatus.textContent = text;
   }
 
   function createPresetStack(kinds) {
@@ -777,6 +832,8 @@
     overlayFlagColor.value = sanitizeHexColor(state.overlay.flagColor, DEFAULT_FLAG_OVERLAY_COLOR);
     overlayFlagColor.disabled = state.overlay.mode !== "flag";
     comparisonMode.value = state.comparison.mode;
+    comparisonOffsetSeconds.value = Number(state.comparison.offsetSeconds || 0).toFixed(2);
+    comparisonOffsetSeconds.disabled = state.comparison.mode === "none";
 
     metricAudio.checked = state.metrics.audio;
     metricSpeech.checked = state.metrics.speech;
@@ -1067,17 +1124,8 @@
     };
   }
 
-  async function parseOverlayCsvFromInputFile(file) {
-    if (!file) {
-      overlayParsed = null;
-      overlayStatusMessage = "";
-      updateOverlayCsvHint();
-      renderTransformStack();
-      return;
-    }
-
+  function parseOverlayCsvFromRawText(csvText, sourceLabel, persistToState) {
     try {
-      const csvText = await file.text();
       overlayParsed = parseOverlayCsvText(csvText, state.overlay.mode);
       overlayStatusMessage =
         "Loaded " +
@@ -1087,24 +1135,78 @@
         "/" +
         overlayParsed.totalRows +
         " active rows) from " +
-        file.name +
+        sourceLabel +
         ".";
+
+      if (persistToState) {
+        if (csvText.length <= MAX_PERSISTED_OVERLAY_CSV_CHARS) {
+          state.overlay.csvText = csvText;
+        } else {
+          state.overlay.csvText = null;
+          overlayStatusMessage += " CSV too large to persist across reopen.";
+        }
+      }
     } catch (error) {
       overlayParsed = null;
       overlayStatusMessage = "Invalid CSV: " + toErrorText(error);
+      if (persistToState) {
+        state.overlay.csvText = null;
+      }
+    }
+  }
+
+  async function parseOverlayCsvFromInputFile(file) {
+    if (!file) {
+      overlayParsed = null;
+      overlayStatusMessage = "";
+      state.overlay.csvText = null;
+      updateOverlayCsvHint();
+      renderTransformStack();
+      postState();
+      return;
+    }
+
+    try {
+      const csvText = await file.text();
+      parseOverlayCsvFromRawText(csvText, file.name, true);
+    } catch (error) {
+      overlayParsed = null;
+      overlayStatusMessage = "Invalid CSV: " + toErrorText(error);
+      state.overlay.csvText = null;
     }
 
     updateOverlayCsvHint();
     renderTransformStack();
+    postState();
+  }
+
+  function parseOverlayCsvFromPersistedText() {
+    if (typeof state.overlay.csvText !== "string" || !state.overlay.csvText.trim()) {
+      overlayParsed = null;
+      overlayStatusMessage = "";
+      updateOverlayCsvHint();
+      renderTransformStack();
+      return false;
+    }
+
+    parseOverlayCsvFromRawText(
+      state.overlay.csvText,
+      state.overlay.csvName || "saved CSV",
+      false
+    );
+    updateOverlayCsvHint();
+    renderTransformStack();
+    return true;
   }
 
   async function reparseOverlayCsvIfPresent() {
     const file = overlayCsv.files && overlayCsv.files[0] ? overlayCsv.files[0] : null;
-    if (!file) {
+    if (file) {
+      await parseOverlayCsvFromInputFile(file);
       return;
     }
 
-    await parseOverlayCsvFromInputFile(file);
+    parseOverlayCsvFromPersistedText();
   }
 
   function swapStackItems(fromIndex, toIndex) {
@@ -1364,6 +1466,16 @@
       }
 
       return {
+        audioKey:
+          fileName +
+          "::" +
+          decoded.sampleRate +
+          "::" +
+          decoded.length +
+          "::" +
+          Date.now() +
+          "::" +
+          Math.random().toString(16).slice(2),
         fileName,
         sampleRate: decoded.sampleRate,
         channelCount,
@@ -1425,6 +1537,43 @@
         "Decode failed; playback-only mode. " + toErrorText(error)
       );
     }
+  }
+
+  async function onComparisonAudioSelected() {
+    const file = comparisonAudio.files && comparisonAudio.files[0] ? comparisonAudio.files[0] : null;
+
+    if (!file) {
+      comparisonAudioData = null;
+      comparisonDerivedCache = createEmptyDerivedCache();
+      setComparisonStatus("Load a second clip to enable comparison rendering.");
+      renderTransformStack();
+      return;
+    }
+
+    setComparisonStatus("Decoding second clip ...");
+
+    try {
+      const decoded = await decodeAudioToMono(file);
+      comparisonAudioData = decoded;
+      comparisonDerivedCache = createEmptyDerivedCache();
+      setComparisonStatus(
+        "Loaded " +
+          file.name +
+          " | " +
+          decoded.sampleRate +
+          " Hz | " +
+          decoded.channelCount +
+          " ch | " +
+          decoded.duration.toFixed(2) +
+          " s"
+      );
+    } catch (error) {
+      comparisonAudioData = null;
+      comparisonDerivedCache = createEmptyDerivedCache();
+      setComparisonStatus("Failed to decode second clip: " + toErrorText(error));
+    }
+
+    renderTransformStack();
   }
 
   async function onCustomFilterbankSelected() {
@@ -1543,26 +1692,40 @@
     return out;
   }
 
-  function ensureStft(item) {
-    if (!primaryAudio) {
+  function getAudioCachePrefix(audioData) {
+    if (!audioData) {
+      return "audio:none";
+    }
+
+    return (
+      (audioData.audioKey || audioData.fileName || "audio") +
+      "::" +
+      audioData.sampleRate +
+      "::" +
+      audioData.samples.length
+    );
+  }
+
+  function ensureStftForAudio(item, audioData, cache) {
+    if (!audioData) {
       throw new Error("Select an audio file first.");
     }
 
     const stftParams = getItemStftParams(item);
-    const stftKey = stftParamsToKey(stftParams);
-    if (derivedCache.stftByKey[stftKey]) {
-      return derivedCache.stftByKey[stftKey];
+    const stftKey = getAudioCachePrefix(audioData) + "::" + stftParamsToKey(stftParams);
+    if (cache.stftByKey[stftKey]) {
+      return cache.stftByKey[stftKey];
     }
 
-    const maxSamples = Math.floor(primaryAudio.sampleRate * stftParams.maxAnalysisSeconds);
+    const maxSamples = Math.floor(audioData.sampleRate * stftParams.maxAnalysisSeconds);
     const analysisSamples =
-      primaryAudio.samples.length <= maxSamples
-        ? primaryAudio.samples
-        : primaryAudio.samples.slice(0, maxSamples);
+      audioData.samples.length <= maxSamples
+        ? audioData.samples
+        : audioData.samples.slice(0, maxSamples);
 
     const stft = computeStft(
       analysisSamples,
-      primaryAudio.sampleRate,
+      audioData.sampleRate,
       stftParams.windowSize,
       stftParams.hopSize,
       stftParams.maxFrames,
@@ -1571,8 +1734,12 @@
     stft.cacheKey = stftKey;
     stft.overlapPercent = stftParams.overlapPercent;
     stft.windowType = stftParams.windowType;
-    derivedCache.stftByKey[stftKey] = stft;
+    cache.stftByKey[stftKey] = stft;
     return stft;
+  }
+
+  function ensureStft(item) {
+    return ensureStftForAudio(item, primaryAudio, derivedCache);
   }
 
   function computeStft(samples, sampleRate, fftSize, hopSize, maxFrames, windowType) {
@@ -1718,12 +1885,12 @@
     return reversed;
   }
 
-  function ensureMel(item) {
-    const stft = ensureStft(item);
+  function ensureMelForAudio(item, audioData, cache) {
+    const stft = ensureStftForAudio(item, audioData, cache);
     const melParams = getItemMelParams(item, stft.sampleRate);
     const melKey = stft.cacheKey + "::" + melParamsToKey(melParams);
-    if (derivedCache.melByKey[melKey]) {
-      return derivedCache.melByKey[melKey];
+    if (cache.melByKey[melKey]) {
+      return cache.melByKey[melKey];
     }
 
     const filterbank = createMelFilterbank(
@@ -1744,8 +1911,12 @@
       durationSeconds: stft.durationSeconds
     };
 
-    derivedCache.melByKey[melKey] = melResult;
+    cache.melByKey[melKey] = melResult;
     return melResult;
+  }
+
+  function ensureMel(item) {
+    return ensureMelForAudio(item, primaryAudio, derivedCache);
   }
 
   function createMelFilterbank(sampleRate, fftSize, melBands, minHz, maxHz) {
@@ -1823,12 +1994,12 @@
     return output;
   }
 
-  function ensureMfcc(item) {
-    const mel = ensureMel(item);
+  function ensureMfccForAudio(item, audioData, cache) {
+    const mel = ensureMelForAudio(item, audioData, cache);
     const mfccParams = getItemMfccParams(item, mel.bands);
     const mfccKey = mel.cacheKey + "::" + mfccParams.coeffs;
-    if (derivedCache.mfccByKey[mfccKey]) {
-      return derivedCache.mfccByKey[mfccKey];
+    if (cache.mfccByKey[mfccKey]) {
+      return cache.mfccByKey[mfccKey];
     }
 
     const mfccMatrix = dctRows(mel.matrix, mfccParams.coeffs);
@@ -1839,16 +2010,20 @@
       durationSeconds: mel.durationSeconds
     };
 
-    derivedCache.mfccByKey[mfccKey] = mfccResult;
+    cache.mfccByKey[mfccKey] = mfccResult;
     return mfccResult;
   }
 
-  function ensureDct(item) {
-    const stft = ensureStft(item);
+  function ensureMfcc(item) {
+    return ensureMfccForAudio(item, primaryAudio, derivedCache);
+  }
+
+  function ensureDctForAudio(item, audioData, cache) {
+    const stft = ensureStftForAudio(item, audioData, cache);
     const dctParams = getItemDctParams(item, stft.binCount);
     const dctKey = stft.cacheKey + "::" + dctParams.coeffs;
-    if (derivedCache.dctByKey[dctKey]) {
-      return derivedCache.dctByKey[dctKey];
+    if (cache.dctByKey[dctKey]) {
+      return cache.dctByKey[dctKey];
     }
 
     const dctMatrix = dctRows(stft.logMagnitudeFrames, dctParams.coeffs);
@@ -1859,20 +2034,24 @@
       durationSeconds: stft.durationSeconds
     };
 
-    derivedCache.dctByKey[dctKey] = dctResult;
+    cache.dctByKey[dctKey] = dctResult;
     return dctResult;
   }
 
-  function ensureCustomFilterbank(item) {
+  function ensureDct(item) {
+    return ensureDctForAudio(item, primaryAudio, derivedCache);
+  }
+
+  function ensureCustomFilterbankForAudio(item, audioData, cache) {
     if (!customFilterbank) {
       throw new Error("Upload a custom filterbank CSV first.");
     }
 
-    const stft = ensureStft(item);
+    const stft = ensureStftForAudio(item, audioData, cache);
     const key = customFilterbank.fileName + "::" + stft.cacheKey + "::" + stft.binCount;
 
-    if (derivedCache.customFilterbankByKey[key]) {
-      return derivedCache.customFilterbankByKey[key];
+    if (cache.customFilterbankByKey[key]) {
+      return cache.customFilterbankByKey[key];
     }
 
     const normalized = buildNormalizedFilterbank(customFilterbank.rows, stft.binCount);
@@ -1885,9 +2064,13 @@
       durationSeconds: stft.durationSeconds
     };
 
-    derivedCache.customFilterbankByKey[key] = customResult;
+    cache.customFilterbankByKey[key] = customResult;
 
     return customResult;
+  }
+
+  function ensureCustomFilterbank(item) {
+    return ensureCustomFilterbankForAudio(item, primaryAudio, derivedCache);
   }
 
   function dctRows(matrix, coeffCount) {
@@ -1967,30 +2150,32 @@
     }
   }
 
-  function buildTransformRenderSpec(item) {
+  function buildTransformRenderSpecForAudio(item, audioData, cache, audioRoleLabel) {
     const kind = item.kind;
-    if (!primaryAudio) {
-      throw new Error("Load a primary audio clip to render this view.");
+    if (!audioData) {
+      throw new Error("Load the " + audioRoleLabel + " to render this view.");
     }
 
     if (kind === "timeseries") {
       return {
         type: "waveform",
-        domainLength: primaryAudio.samples.length,
-        durationSeconds: primaryAudio.duration,
-        sampleRate: primaryAudio.sampleRate,
-        samples: primaryAudio.samples,
+        domainLength: audioData.samples.length,
+        durationSeconds: audioData.duration,
+        sampleRate: audioData.sampleRate,
+        samples: audioData.samples,
         caption:
-          "Raw samples from decoded mono mixdown (" +
-          primaryAudio.sampleRate +
+          "Raw samples from " +
+          audioRoleLabel +
+          " decoded mono mixdown (" +
+          audioData.sampleRate +
           " Hz, " +
-          primaryAudio.duration.toFixed(2) +
+          audioData.duration.toFixed(2) +
           " s)."
       };
     }
 
     if (kind === "stft") {
-      const stft = ensureStft(item);
+      const stft = ensureStftForAudio(item, audioData, cache);
       if (getItemStftMode(item) === "phase") {
         return {
           type: "matrix",
@@ -2035,7 +2220,7 @@
     }
 
     if (kind === "mel") {
-      const mel = ensureMel(item);
+      const mel = ensureMelForAudio(item, audioData, cache);
       return {
         type: "matrix",
         domainLength: mel.matrix.length,
@@ -2053,7 +2238,7 @@
     }
 
     if (kind === "mfcc") {
-      const mfcc = ensureMfcc(item);
+      const mfcc = ensureMfccForAudio(item, audioData, cache);
       return {
         type: "matrix",
         domainLength: mfcc.matrix.length,
@@ -2064,7 +2249,7 @@
     }
 
     if (kind === "dct") {
-      const dct = ensureDct(item);
+      const dct = ensureDctForAudio(item, audioData, cache);
       return {
         type: "matrix",
         domainLength: dct.matrix.length,
@@ -2075,7 +2260,7 @@
     }
 
     if (kind === "custom_filterbank") {
-      const custom = ensureCustomFilterbank(item);
+      const custom = ensureCustomFilterbankForAudio(item, audioData, cache);
       return {
         type: "matrix",
         domainLength: custom.matrix.length,
@@ -2093,12 +2278,28 @@
     throw new Error("Unsupported transform: " + kind);
   }
 
-  function pickCanvasWidth() {
-    const containerWidth = Math.floor(renderStackContainer.clientWidth || 700);
-    return clamp(containerWidth - 24, 360, 1800);
+  function buildTransformRenderSpec(item) {
+    return buildTransformRenderSpecForAudio(item, primaryAudio, derivedCache, "primary clip");
   }
 
-  function drawWaveform(canvas, samples, startIndex, endIndex, zoomLevel) {
+  function pickCanvasWidth(panelCount) {
+    const safePanelCount = Math.max(1, panelCount || 1);
+    const containerWidth = Math.floor(renderStackContainer.clientWidth || 700);
+    const gapTotal = (safePanelCount - 1) * 8;
+    const targetWidth = (containerWidth - 24 - gapTotal) / safePanelCount;
+    return clamp(Math.floor(targetWidth), 240, 1800);
+  }
+
+  function getCanvasWidthPanelDivisor(comparisonMode, panelCount) {
+    if (comparisonMode === "side_by_side" || comparisonMode === "side_by_side_difference") {
+      return Math.max(1, panelCount || 1);
+    }
+
+    return 1;
+  }
+
+  function drawWaveform(canvas, samples, startIndex, endIndex, zoomLevel, options) {
+    const opts = options || {};
     const ctx = canvas.getContext("2d");
     if (!ctx) {
       return;
@@ -2107,8 +2308,10 @@
     const width = canvas.width;
     const height = canvas.height;
 
-    ctx.fillStyle = "#0b1220";
-    ctx.fillRect(0, 0, width, height);
+    if (opts.clear !== false) {
+      ctx.fillStyle = opts.backgroundColor || "#0b1220";
+      ctx.fillRect(0, 0, width, height);
+    }
 
     const mid = Math.floor(height / 2);
     const visibleCount = Math.max(1, endIndex - startIndex);
@@ -2137,8 +2340,10 @@
         });
       }
 
-      ctx.strokeStyle = "#7dd3fc";
-      ctx.lineWidth = 1.2;
+      ctx.save();
+      ctx.globalAlpha = Number.isFinite(opts.alpha) ? clamp(opts.alpha, 0, 1) : 1;
+      ctx.strokeStyle = opts.strokeColor || "#7dd3fc";
+      ctx.lineWidth = opts.lineWidth || 1.2;
       ctx.beginPath();
 
       for (let pointIndex = 0; pointIndex < points.length; pointIndex += 1) {
@@ -2152,7 +2357,7 @@
       ctx.stroke();
 
       const pointRadius = points.length > 1200 ? 0.7 : points.length > 600 ? 0.9 : 1.2;
-      ctx.fillStyle = "#38bdf8";
+      ctx.fillStyle = opts.pointColor || "#38bdf8";
 
       for (let pointIndex = 0; pointIndex < points.length; pointIndex += 1) {
         const point = points[pointIndex];
@@ -2164,9 +2369,12 @@
           ctx.fill();
         }
       }
+      ctx.restore();
     } else {
-      ctx.strokeStyle = "#7dd3fc";
-      ctx.lineWidth = 1;
+      ctx.save();
+      ctx.globalAlpha = Number.isFinite(opts.alpha) ? clamp(opts.alpha, 0, 1) : 1;
+      ctx.strokeStyle = opts.strokeColor || "#7dd3fc";
+      ctx.lineWidth = opts.lineWidth || 1;
       ctx.beginPath();
 
       for (let x = 0; x < width; x += 1) {
@@ -2195,13 +2403,16 @@
       }
 
       ctx.stroke();
+      ctx.restore();
     }
 
-    ctx.strokeStyle = "rgba(255,255,255,0.24)";
-    ctx.beginPath();
-    ctx.moveTo(0, mid + 0.5);
-    ctx.lineTo(width, mid + 0.5);
-    ctx.stroke();
+    if (opts.drawMidline !== false) {
+      ctx.strokeStyle = opts.midlineColor || "rgba(255,255,255,0.24)";
+      ctx.beginPath();
+      ctx.moveTo(0, mid + 0.5);
+      ctx.lineTo(width, mid + 0.5);
+      ctx.stroke();
+    }
   }
 
   function drawHeatmap(canvas, matrix, startFrame, endFrame, fixedRange) {
@@ -2226,8 +2437,35 @@
     const minValue = range.min;
     const maxValue = range.max;
     const span = Math.max(1e-9, maxValue - minValue);
+    const image = createHeatmapImageData(
+      width,
+      height,
+      matrix,
+      startFrame,
+      visibleFrameCount,
+      bins,
+      minValue,
+      span,
+      heatColor
+    );
+    ctx.putImageData(image, 0, 0);
 
-    const image = ctx.createImageData(width, height);
+    ctx.strokeStyle = "rgba(255,255,255,0.20)";
+    ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
+  }
+
+  function createHeatmapImageData(
+    width,
+    height,
+    matrix,
+    startFrame,
+    visibleFrameCount,
+    bins,
+    minValue,
+    span,
+    colorMapper
+  ) {
+    const image = new ImageData(width, height);
 
     for (let y = 0; y < height; y += 1) {
       const normalizedY = 1 - y / Math.max(1, height - 1);
@@ -2239,7 +2477,7 @@
         const frame = matrix[clamp(frameIndex, 0, matrix.length - 1)];
         const value = frame[binIndex];
         const normalized = clamp((value - minValue) / span, 0, 1);
-        const color = heatColor(normalized);
+        const color = colorMapper(normalized);
 
         const offset = (y * width + x) * 4;
         image.data[offset] = color[0];
@@ -2249,10 +2487,7 @@
       }
     }
 
-    ctx.putImageData(image, 0, 0);
-
-    ctx.strokeStyle = "rgba(255,255,255,0.20)";
-    ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
+    return image;
   }
 
   function drawActivationOverlay(canvas, renderSpec, windowInfo) {
@@ -2307,6 +2542,353 @@
     });
 
     ctx.restore();
+  }
+
+  function domainIndexToTimeSec(renderSpec, index) {
+    if (!renderSpec || renderSpec.domainLength <= 1 || renderSpec.durationSeconds <= 0) {
+      return 0;
+    }
+
+    const last = renderSpec.domainLength - 1;
+    return (clamp(index, 0, last) / last) * renderSpec.durationSeconds;
+  }
+
+  function timeSecToDomainIndex(renderSpec, timeSec) {
+    if (!renderSpec || renderSpec.domainLength <= 1 || renderSpec.durationSeconds <= 0) {
+      return 0;
+    }
+
+    const last = renderSpec.domainLength - 1;
+    const clampedTime = clamp(timeSec, 0, renderSpec.durationSeconds);
+    return (clampedTime / renderSpec.durationSeconds) * last;
+  }
+
+  function sampleAtIndex(samples, indexFloat) {
+    if (!samples || samples.length === 0) {
+      return 0;
+    }
+
+    const left = clamp(Math.floor(indexFloat), 0, samples.length - 1);
+    const right = clamp(left + 1, 0, samples.length - 1);
+    const frac = clamp(indexFloat - left, 0, 1);
+    return samples[left] * (1 - frac) + samples[right] * frac;
+  }
+
+  function getMatrixValueAtTime(renderSpec, timeSec, binIndexFloat) {
+    if (!renderSpec || !Array.isArray(renderSpec.matrix) || renderSpec.matrix.length === 0) {
+      return 0;
+    }
+
+    const frameFloat = timeSecToDomainIndex(renderSpec, timeSec);
+    const frameIndex = clamp(Math.round(frameFloat), 0, renderSpec.matrix.length - 1);
+    const row = renderSpec.matrix[frameIndex];
+    if (!row || row.length === 0) {
+      return 0;
+    }
+
+    const binIndex = clamp(Math.round(binIndexFloat), 0, row.length - 1);
+    return row[binIndex];
+  }
+
+  function mapPrimaryWindowToSecondaryWindow(primarySpec, secondarySpec, primaryWindow, offsetSeconds) {
+    const startTime = domainIndexToTimeSec(primarySpec, primaryWindow.startIndex) + offsetSeconds;
+    const endTime = domainIndexToTimeSec(primarySpec, primaryWindow.endIndex - 1) + offsetSeconds;
+    const hasOverlap = endTime >= 0 && startTime <= secondarySpec.durationSeconds;
+
+    const startIndex = Math.floor(timeSecToDomainIndex(secondarySpec, startTime));
+    const endIndex = Math.ceil(timeSecToDomainIndex(secondarySpec, endTime)) + 1;
+
+    return {
+      hasOverlap,
+      startIndex: clamp(startIndex, 0, Math.max(0, secondarySpec.domainLength - 1)),
+      endIndex: clamp(endIndex, 1, secondarySpec.domainLength),
+      visibleCount: Math.max(1, endIndex - startIndex)
+    };
+  }
+
+  function secondaryHeatColor(t) {
+    const x = clamp(t, 0, 1);
+    const r = Math.round(255 * clamp(1.25 * x + 0.1, 0, 1));
+    const g = Math.round(255 * clamp(1.5 - Math.abs(1.9 * x - 0.95), 0, 1));
+    const b = Math.round(255 * clamp(1.6 - 0.9 * x, 0, 1));
+    return [r, g, b];
+  }
+
+  function divergingDiffColor(t) {
+    const x = clamp(t, 0, 1);
+    if (x <= 0.5) {
+      const p = x / 0.5;
+      return [Math.round(255 * p), Math.round(255 * p), 255];
+    }
+
+    const p = (x - 0.5) / 0.5;
+    return [255, Math.round(255 * (1 - p)), Math.round(255 * (1 - p))];
+  }
+
+  function estimateMatrixDifferenceMaxAbs(primarySpec, secondarySpec, primaryWindow, offsetSeconds) {
+    const frameCount = Math.max(1, primaryWindow.visibleCount);
+    const frameStep = Math.max(1, Math.floor(frameCount / 240));
+    const bins = primarySpec.matrix && primarySpec.matrix[0] ? primarySpec.matrix[0].length : 0;
+    const binStep = Math.max(1, Math.floor(Math.max(1, bins) / 96));
+    let maxAbs = 0;
+
+    for (let frame = primaryWindow.startIndex; frame < primaryWindow.endIndex; frame += frameStep) {
+      const timeSec = domainIndexToTimeSec(primarySpec, frame);
+      const secondaryTimeSec = timeSec + offsetSeconds;
+      for (let bin = 0; bin < bins; bin += binStep) {
+        const primaryValue = getMatrixValueAtTime(primarySpec, timeSec, bin);
+        const secondaryValue = getMatrixValueAtTime(secondarySpec, secondaryTimeSec, bin);
+        const absDiff = Math.abs(primaryValue - secondaryValue);
+        if (absDiff > maxAbs) {
+          maxAbs = absDiff;
+        }
+      }
+    }
+
+    return Math.max(1e-9, maxAbs);
+  }
+
+  function drawWaveformOverlayComparison(canvas, primarySpec, secondarySpec, primaryWindow, offsetSeconds) {
+    drawWaveform(
+      canvas,
+      primarySpec.samples,
+      primaryWindow.startIndex,
+      primaryWindow.endIndex,
+      primaryWindow.zoom,
+      {
+        clear: true,
+        strokeColor: "#7dd3fc",
+        pointColor: "#38bdf8",
+        alpha: 1
+      }
+    );
+
+    const secondaryWindow = mapPrimaryWindowToSecondaryWindow(
+      primarySpec,
+      secondarySpec,
+      primaryWindow,
+      offsetSeconds
+    );
+    if (!secondaryWindow.hasOverlap) {
+      return;
+    }
+
+    drawWaveform(
+      canvas,
+      secondarySpec.samples,
+      secondaryWindow.startIndex,
+      secondaryWindow.endIndex,
+      primaryWindow.zoom,
+      {
+        clear: false,
+        strokeColor: "#f472b6",
+        pointColor: "#f9a8d4",
+        alpha: 0.82,
+        drawMidline: false
+      }
+    );
+  }
+
+  function drawWaveformDifferenceComparison(canvas, primarySpec, secondarySpec, primaryWindow, offsetSeconds) {
+    const secondaryWindow = mapPrimaryWindowToSecondaryWindow(
+      primarySpec,
+      secondarySpec,
+      primaryWindow,
+      offsetSeconds
+    );
+    if (!secondaryWindow.hasOverlap) {
+      drawNoOverlapPlaceholder(canvas, "No overlap at current offset");
+      return;
+    }
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+
+    const width = canvas.width;
+    const height = canvas.height;
+    const mid = Math.floor(height / 2);
+
+    ctx.fillStyle = "#0b1220";
+    ctx.fillRect(0, 0, width, height);
+    ctx.strokeStyle = "rgba(255,255,255,0.24)";
+    ctx.beginPath();
+    ctx.moveTo(0, mid + 0.5);
+    ctx.lineTo(width, mid + 0.5);
+    ctx.stroke();
+
+    ctx.strokeStyle = "#fb7185";
+    ctx.lineWidth = 1.1;
+    ctx.beginPath();
+
+    for (let x = 0; x < width; x += 1) {
+      const localRatio = x / Math.max(1, width - 1);
+      const primaryIndex =
+        primaryWindow.startIndex + localRatio * Math.max(1, primaryWindow.visibleCount - 1);
+      const timeSec = domainIndexToTimeSec(primarySpec, primaryIndex);
+      const secondaryTimeSec = timeSec + offsetSeconds;
+      const primaryValue = sampleAtIndex(primarySpec.samples, primaryIndex);
+      const secondaryIndex = timeSecToDomainIndex(secondarySpec, secondaryTimeSec);
+      const secondaryValue = sampleAtIndex(secondarySpec.samples, secondaryIndex);
+      const diff = clamp(primaryValue - secondaryValue, -1, 1);
+      const y = mid + diff * (height * 0.46);
+
+      if (x === 0) {
+        ctx.moveTo(x, y);
+      } else {
+        ctx.lineTo(x, y);
+      }
+    }
+
+    ctx.stroke();
+  }
+
+  function drawHeatmapOverlayComparison(
+    canvas,
+    primarySpec,
+    secondarySpec,
+    primaryWindow,
+    offsetSeconds
+  ) {
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+
+    const width = canvas.width;
+    const height = canvas.height;
+
+    const primaryRange = resolveMatrixRange(
+      primarySpec.matrix,
+      primaryWindow.startIndex,
+      primaryWindow.endIndex,
+      primarySpec.valueRange
+    );
+    const primarySpan = Math.max(1e-9, primaryRange.max - primaryRange.min);
+
+    const secondaryWindow = mapPrimaryWindowToSecondaryWindow(
+      primarySpec,
+      secondarySpec,
+      primaryWindow,
+      offsetSeconds
+    );
+    if (!secondaryWindow.hasOverlap) {
+      drawHeatmap(
+        canvas,
+        primarySpec.matrix,
+        primaryWindow.startIndex,
+        primaryWindow.endIndex,
+        primarySpec.valueRange
+      );
+      return;
+    }
+    const secondaryRange = resolveMatrixRange(
+      secondarySpec.matrix,
+      secondaryWindow.startIndex,
+      secondaryWindow.endIndex,
+      secondarySpec.valueRange
+    );
+    const secondarySpan = Math.max(1e-9, secondaryRange.max - secondaryRange.min);
+
+    const bins = primarySpec.matrix[0].length;
+    const image = new ImageData(width, height);
+
+    for (let y = 0; y < height; y += 1) {
+      const normalizedY = 1 - y / Math.max(1, height - 1);
+      const bin = normalizedY * Math.max(0, bins - 1);
+
+      for (let x = 0; x < width; x += 1) {
+        const localRatio = x / Math.max(1, width - 1);
+        const primaryIndex =
+          primaryWindow.startIndex + localRatio * Math.max(1, primaryWindow.visibleCount - 1);
+        const timeSec = domainIndexToTimeSec(primarySpec, primaryIndex);
+        const secondaryTimeSec = timeSec + offsetSeconds;
+
+        const primaryValue = getMatrixValueAtTime(primarySpec, timeSec, bin);
+        const secondaryValue = getMatrixValueAtTime(secondarySpec, secondaryTimeSec, bin);
+        const primaryColor = heatColor((primaryValue - primaryRange.min) / primarySpan);
+        const secondaryColor = secondaryHeatColor((secondaryValue - secondaryRange.min) / secondarySpan);
+
+        const mixed = [
+          Math.round(primaryColor[0] * 0.58 + secondaryColor[0] * 0.42),
+          Math.round(primaryColor[1] * 0.58 + secondaryColor[1] * 0.42),
+          Math.round(primaryColor[2] * 0.58 + secondaryColor[2] * 0.42)
+        ];
+
+        const offset = (y * width + x) * 4;
+        image.data[offset] = mixed[0];
+        image.data[offset + 1] = mixed[1];
+        image.data[offset + 2] = mixed[2];
+        image.data[offset + 3] = 255;
+      }
+    }
+
+    ctx.putImageData(image, 0, 0);
+    ctx.strokeStyle = "rgba(255,255,255,0.20)";
+    ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
+  }
+
+  function drawHeatmapDifferenceComparison(
+    canvas,
+    primarySpec,
+    secondarySpec,
+    primaryWindow,
+    offsetSeconds
+  ) {
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+
+    const width = canvas.width;
+    const height = canvas.height;
+    const bins = primarySpec.matrix[0].length;
+    const overlapWindow = mapPrimaryWindowToSecondaryWindow(
+      primarySpec,
+      secondarySpec,
+      primaryWindow,
+      offsetSeconds
+    );
+    if (!overlapWindow.hasOverlap) {
+      drawNoOverlapPlaceholder(canvas, "No overlap at current offset");
+      return;
+    }
+    const maxAbs = estimateMatrixDifferenceMaxAbs(
+      primarySpec,
+      secondarySpec,
+      primaryWindow,
+      offsetSeconds
+    );
+
+    const image = new ImageData(width, height);
+    for (let y = 0; y < height; y += 1) {
+      const normalizedY = 1 - y / Math.max(1, height - 1);
+      const bin = normalizedY * Math.max(0, bins - 1);
+
+      for (let x = 0; x < width; x += 1) {
+        const localRatio = x / Math.max(1, width - 1);
+        const primaryIndex =
+          primaryWindow.startIndex + localRatio * Math.max(1, primaryWindow.visibleCount - 1);
+        const timeSec = domainIndexToTimeSec(primarySpec, primaryIndex);
+        const secondaryTimeSec = timeSec + offsetSeconds;
+
+        const primaryValue = getMatrixValueAtTime(primarySpec, timeSec, bin);
+        const secondaryValue = getMatrixValueAtTime(secondarySpec, secondaryTimeSec, bin);
+        const diff = (primaryValue - secondaryValue) / maxAbs;
+        const color = divergingDiffColor(diff * 0.5 + 0.5);
+
+        const offset = (y * width + x) * 4;
+        image.data[offset] = color[0];
+        image.data[offset + 1] = color[1];
+        image.data[offset + 2] = color[2];
+        image.data[offset + 3] = 255;
+      }
+    }
+
+    ctx.putImageData(image, 0, 0);
+    ctx.strokeStyle = "rgba(255,255,255,0.20)";
+    ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
   }
 
   function resolveMatrixRange(matrix, startFrame, endFrame, fixedRange) {
@@ -3176,6 +3758,136 @@
     });
   }
 
+  function drawNoOverlapPlaceholder(canvas, message) {
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+
+    ctx.fillStyle = "#0b1220";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = "rgba(255,255,255,0.20)";
+    ctx.strokeRect(0.5, 0.5, canvas.width - 1, canvas.height - 1);
+    ctx.fillStyle = "rgba(255,255,255,0.74)";
+    ctx.font = "12px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(message || "No overlap in current window", canvas.width / 2, canvas.height / 2);
+  }
+
+  function drawPanelCanvasForComparisonRole(
+    role,
+    canvas,
+    primaryRenderSpec,
+    secondaryRenderSpec,
+    windowInfo,
+    offsetSeconds
+  ) {
+    if (role === "primary") {
+      if (primaryRenderSpec.type === "waveform") {
+        drawWaveform(
+          canvas,
+          primaryRenderSpec.samples,
+          windowInfo.startIndex,
+          windowInfo.endIndex,
+          windowInfo.zoom
+        );
+      } else {
+        drawHeatmap(
+          canvas,
+          primaryRenderSpec.matrix,
+          windowInfo.startIndex,
+          windowInfo.endIndex,
+          primaryRenderSpec.valueRange
+        );
+      }
+      return;
+    }
+
+    if (!secondaryRenderSpec) {
+      drawNoOverlapPlaceholder(canvas, "Load second clip for comparison");
+      return;
+    }
+
+    if (role === "secondary") {
+      const secondaryWindow = mapPrimaryWindowToSecondaryWindow(
+        primaryRenderSpec,
+        secondaryRenderSpec,
+        windowInfo,
+        offsetSeconds
+      );
+
+      if (!secondaryWindow.hasOverlap) {
+        drawNoOverlapPlaceholder(canvas, "No overlap at current offset");
+        return;
+      }
+
+      if (secondaryRenderSpec.type === "waveform") {
+        drawWaveform(
+          canvas,
+          secondaryRenderSpec.samples,
+          secondaryWindow.startIndex,
+          secondaryWindow.endIndex,
+          windowInfo.zoom,
+          {
+            strokeColor: "#f472b6",
+            pointColor: "#f9a8d4"
+          }
+        );
+      } else {
+        drawHeatmap(
+          canvas,
+          secondaryRenderSpec.matrix,
+          secondaryWindow.startIndex,
+          secondaryWindow.endIndex,
+          secondaryRenderSpec.valueRange
+        );
+      }
+      return;
+    }
+
+    if (role === "overlay") {
+      if (primaryRenderSpec.type === "waveform") {
+        drawWaveformOverlayComparison(
+          canvas,
+          primaryRenderSpec,
+          secondaryRenderSpec,
+          windowInfo,
+          offsetSeconds
+        );
+      } else {
+        drawHeatmapOverlayComparison(
+          canvas,
+          primaryRenderSpec,
+          secondaryRenderSpec,
+          windowInfo,
+          offsetSeconds
+        );
+      }
+      return;
+    }
+
+    if (role === "difference") {
+      if (primaryRenderSpec.type === "waveform") {
+        drawWaveformDifferenceComparison(
+          canvas,
+          primaryRenderSpec,
+          secondaryRenderSpec,
+          windowInfo,
+          offsetSeconds
+        );
+      } else {
+        drawHeatmapDifferenceComparison(
+          canvas,
+          primaryRenderSpec,
+          secondaryRenderSpec,
+          windowInfo,
+          offsetSeconds
+        );
+      }
+    }
+  }
+
   function renderTransformStack() {
     cleanupViewStateCache();
     playheadElementsByViewId.clear();
@@ -3217,76 +3929,132 @@
       body.className = "transform-card-body";
 
       try {
-        const renderSpec = buildTransformRenderSpec(item);
+        const primaryRenderSpec = buildTransformRenderSpec(item);
+        const activeComparisonMode =
+          state.comparison.mode !== "none" && comparisonAudioData ? state.comparison.mode : "none";
+        const offsetSeconds = sanitizeFloat(state.comparison.offsetSeconds, 0, -30, 30);
+        const secondaryRenderSpec =
+          activeComparisonMode === "none"
+            ? null
+            : buildTransformRenderSpecForAudio(
+                item,
+                comparisonAudioData,
+                comparisonDerivedCache,
+                "second clip"
+              );
 
-        const toolbar = buildTransformToolbar(item, renderSpec);
+        const panelDescriptors =
+          activeComparisonMode === "none"
+            ? [{ role: "primary", label: "Primary" }]
+            : activeComparisonMode === "overlay"
+              ? [{ role: "overlay", label: "Primary + Second Overlay" }]
+              : activeComparisonMode === "side_by_side" || activeComparisonMode === "stacked"
+                ? [
+                    { role: "primary", label: "Primary" },
+                    { role: "secondary", label: "Second" }
+                  ]
+                : [
+                    { role: "primary", label: "Primary" },
+                    { role: "secondary", label: "Second" },
+                    { role: "difference", label: "Difference (Primary - Second)" }
+                  ];
+
+        const toolbar = buildTransformToolbar(item, primaryRenderSpec);
         body.appendChild(toolbar);
 
-        const viewport = document.createElement("div");
-        viewport.className = "transform-viewport";
+        const grid = document.createElement("div");
+        grid.className = "transform-comparison-grid mode-" + activeComparisonMode;
+        const panelWidthDivisor = getCanvasWidthPanelDivisor(
+          activeComparisonMode,
+          panelDescriptors.length
+        );
 
-        const canvas = document.createElement("canvas");
-        canvas.className = "transform-canvas";
-        canvas.width = pickCanvasWidth();
-        canvas.height = renderSpec.type === "waveform" ? WAVEFORM_CANVAS_HEIGHT : MATRIX_CANVAS_HEIGHT;
+        const windowInfo = computeViewWindow(primaryRenderSpec.domainLength, item.id);
+        const viewportPlayheads = [];
 
-        const windowInfo = computeViewWindow(renderSpec.domainLength, item.id);
+        panelDescriptors.forEach(function (panel) {
+          const panelWrap = document.createElement("section");
+          panelWrap.className = "comparison-panel";
 
-        if (renderSpec.type === "waveform") {
-          drawWaveform(
+          if (panelDescriptors.length > 1) {
+            const panelLabel = document.createElement("p");
+            panelLabel.className = "comparison-panel-label";
+            panelLabel.textContent = panel.label;
+            panelWrap.appendChild(panelLabel);
+          }
+
+          const viewport = document.createElement("div");
+          viewport.className = "transform-viewport";
+
+          const canvas = document.createElement("canvas");
+          canvas.className = "transform-canvas";
+          canvas.width = pickCanvasWidth(panelWidthDivisor);
+          canvas.height =
+            primaryRenderSpec.type === "waveform" ? WAVEFORM_CANVAS_HEIGHT : MATRIX_CANVAS_HEIGHT;
+
+          drawPanelCanvasForComparisonRole(
+            panel.role,
             canvas,
-            renderSpec.samples,
-            windowInfo.startIndex,
-            windowInfo.endIndex,
-            windowInfo.zoom
+            primaryRenderSpec,
+            secondaryRenderSpec,
+            windowInfo,
+            offsetSeconds
           );
-        } else {
-          drawHeatmap(
-            canvas,
-            renderSpec.matrix,
-            windowInfo.startIndex,
-            windowInfo.endIndex,
-            renderSpec.valueRange
-          );
-        }
 
-        drawActivationOverlay(canvas, renderSpec, windowInfo);
+          if (panel.role !== "secondary") {
+            drawActivationOverlay(canvas, primaryRenderSpec, windowInfo);
+          }
 
-        attachCanvasInteractions(canvas, item, renderSpec);
+          attachCanvasInteractions(canvas, item, primaryRenderSpec);
 
-        const viewportPlayhead = document.createElement("div");
-        viewportPlayhead.className = "transform-playhead";
+          const viewportPlayhead = document.createElement("div");
+          viewportPlayhead.className = "transform-playhead";
+          viewportPlayheads.push(viewportPlayhead);
 
-        viewport.appendChild(canvas);
-        viewport.appendChild(viewportPlayhead);
-        body.appendChild(viewport);
+          viewport.appendChild(canvas);
+          viewport.appendChild(viewportPlayhead);
+          panelWrap.appendChild(viewport);
+          grid.appendChild(panelWrap);
+        });
 
-        const scrollbar = buildTransformScrollbar(item, renderSpec);
+        body.appendChild(grid);
+
+        const scrollbar = buildTransformScrollbar(item, primaryRenderSpec);
         body.appendChild(scrollbar.element);
 
-        if (renderSpec.type === "waveform") {
-          const waveformBar = buildTimeseriesBar(renderSpec, windowInfo);
+        if (primaryRenderSpec.type === "waveform") {
+          const waveformBar = buildTimeseriesBar(primaryRenderSpec, windowInfo);
           body.appendChild(waveformBar);
 
-          const timeseriesStats = buildTimeseriesStatsPanel(renderSpec, windowInfo);
+          const timeseriesStats = buildTimeseriesStatsPanel(primaryRenderSpec, windowInfo);
           body.appendChild(timeseriesStats);
         }
 
-        if (renderSpec.type === "matrix" && shouldShowSpectralBar(item.id)) {
-          const spectralBar = buildSpectralBar(renderSpec, windowInfo);
+        if (primaryRenderSpec.type === "matrix" && shouldShowSpectralBar(item.id)) {
+          const spectralBar = buildSpectralBar(primaryRenderSpec, windowInfo);
           body.appendChild(spectralBar);
         }
 
         playheadElementsByViewId.set(item.id, {
-          viewportPlayhead,
+          viewportPlayheads,
           scrollbarPlayhead: scrollbar.playhead,
-          domainLength: renderSpec.domainLength,
-          durationSeconds: renderSpec.durationSeconds
+          domainLength: primaryRenderSpec.domainLength,
+          durationSeconds: primaryRenderSpec.durationSeconds
         });
 
         const caption = document.createElement("p");
         caption.className = "transform-caption";
-        caption.textContent = renderSpec.caption;
+        if (activeComparisonMode === "none") {
+          caption.textContent = primaryRenderSpec.caption;
+        } else {
+          caption.textContent =
+            primaryRenderSpec.caption +
+            " | comparison=" +
+            activeComparisonMode +
+            ", offset=" +
+            offsetSeconds.toFixed(2) +
+            " s";
+        }
         body.appendChild(caption);
       } catch (error) {
         const empty = document.createElement("div");
@@ -3306,7 +4074,9 @@
   function updateAnimatedPlayheads() {
     if (!primaryAudio || primaryAudio.duration <= 0) {
       playheadElementsByViewId.forEach(function (entry) {
-        entry.viewportPlayhead.style.opacity = "0";
+        entry.viewportPlayheads.forEach(function (playhead) {
+          playhead.style.opacity = "0";
+        });
         entry.scrollbarPlayhead.style.left = "0%";
       });
       return;
@@ -3324,12 +4094,14 @@
       const localRatio =
         (globalIndex - windowInfo.startIndex) / Math.max(1, windowInfo.visibleCount - 1);
 
-      if (localRatio >= 0 && localRatio <= 1) {
-        entry.viewportPlayhead.style.opacity = "1";
-        entry.viewportPlayhead.style.left = (localRatio * 100).toFixed(4) + "%";
-      } else {
-        entry.viewportPlayhead.style.opacity = "0";
-      }
+      entry.viewportPlayheads.forEach(function (playhead) {
+        if (localRatio >= 0 && localRatio <= 1) {
+          playhead.style.opacity = "1";
+          playhead.style.left = (localRatio * 100).toFixed(4) + "%";
+        } else {
+          playhead.style.opacity = "0";
+        }
+      });
 
       entry.scrollbarPlayhead.style.left = (globalRatio * 100).toFixed(4) + "%";
     });
@@ -3430,7 +4202,6 @@
     const file = overlayCsv.files && overlayCsv.files[0] ? overlayCsv.files[0] : null;
     state.overlay.csvName = file ? file.name : null;
     void parseOverlayCsvFromInputFile(file);
-    postState();
   });
 
   overlayFlagColor.addEventListener("input", function () {
@@ -3443,12 +4214,27 @@
   comparisonMode.value = state.comparison.mode;
   comparisonMode.addEventListener("change", function () {
     state.comparison.mode = comparisonMode.value;
+    comparisonOffsetSeconds.disabled = state.comparison.mode === "none";
+    if (state.comparison.mode === "none") {
+      setComparisonStatus("Comparison disabled.");
+    } else if (!comparisonAudioData) {
+      setComparisonStatus("Select a second clip to render " + state.comparison.mode + " mode.");
+    }
+    renderTransformStack();
     postState();
   });
 
   comparisonAudio.addEventListener("change", function () {
     const file = comparisonAudio.files && comparisonAudio.files[0] ? comparisonAudio.files[0] : null;
     state.comparison.secondAudioName = file ? file.name : null;
+    void onComparisonAudioSelected();
+    postState();
+  });
+
+  comparisonOffsetSeconds.addEventListener("change", function () {
+    state.comparison.offsetSeconds = sanitizeFloat(comparisonOffsetSeconds.value, 0, -30, 30);
+    comparisonOffsetSeconds.value = Number(state.comparison.offsetSeconds).toFixed(2);
+    renderTransformStack();
     postState();
   });
 
@@ -3576,7 +4362,17 @@
   window.addEventListener("resize", scheduleRenderTransformStack);
 
   syncControlsFromState();
+  if (state.comparison.secondAudioName) {
+    setComparisonStatus(
+      "Second clip remembered as " +
+        state.comparison.secondAudioName +
+        ". Re-select it to decode for this session."
+    );
+  } else {
+    setComparisonStatus("Load a second clip to enable comparison rendering.");
+  }
   setPrimaryAudioInputLocked(false, "");
+  parseOverlayCsvFromPersistedText();
   renderStackControls();
   renderTransformStack();
   postState();

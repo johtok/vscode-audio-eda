@@ -1,10 +1,15 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import { buildWorkbenchHtml, getWorkbenchLocalResourceRoots } from "../workbench/workbenchHtml";
-import { WorkbenchStatePersistence } from "../workbench/audioWorkbenchPanel";
 
 interface AudioEdaDocument extends vscode.CustomDocument {
   readonly uri: vscode.Uri;
+}
+
+export interface AudioEdaEditorStatePersistence {
+  loadForUri(uri: vscode.Uri): unknown | undefined;
+  saveForUri(uri: vscode.Uri, state: unknown): Thenable<void> | void;
+  noteRecentWorkspace?(uri: vscode.Uri): Thenable<void> | void;
 }
 
 function createCustomDocument(uri: vscode.Uri): AudioEdaDocument {
@@ -23,7 +28,7 @@ export class AudioEdaCustomEditorProvider
 
   public constructor(
     private readonly extensionUri: vscode.Uri,
-    private readonly statePersistence?: WorkbenchStatePersistence
+    private readonly statePersistence?: AudioEdaEditorStatePersistence
   ) {}
 
   public async openCustomDocument(uri: vscode.Uri): Promise<AudioEdaDocument> {
@@ -34,6 +39,8 @@ export class AudioEdaCustomEditorProvider
     document: AudioEdaDocument,
     webviewPanel: vscode.WebviewPanel
   ): Promise<void> {
+    void this.statePersistence?.noteRecentWorkspace?.(document.uri);
+
     const localRoots = getWorkbenchLocalResourceRoots(this.extensionUri);
     const documentFolder =
       document.uri.scheme === "file" ? vscode.Uri.file(path.dirname(document.uri.fsPath)) : undefined;
@@ -77,14 +84,14 @@ export class AudioEdaCustomEditorProvider
       }
 
       if ("type" in message && message.type === "stateChanged" && "payload" in message) {
-        void this.statePersistence?.save(message.payload);
+        void this.statePersistence?.saveForUri(document.uri, message.payload);
       }
     });
 
     webviewPanel.webview.html = buildWorkbenchHtml(
       webviewPanel.webview,
       this.extensionUri,
-      this.statePersistence?.load()
+      this.statePersistence?.loadForUri(document.uri)
     );
 
     webviewPanel.onDidDispose(() => {

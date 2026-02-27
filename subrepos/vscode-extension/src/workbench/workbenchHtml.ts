@@ -52,6 +52,7 @@ export function buildWorkbenchHtml(
         <div class="media-inputs">
           <label class="row" for="primary-audio-file">Primary audio clip</label>
           <input id="primary-audio-file" type="file" accept=".wav,.flac,.mp3,.mpga,.mpeg,.ogg,.m4a,.aac,.opus,.sph" />
+          <input id="primary-audio-file-locked" type="text" readonly disabled hidden />
           <audio id="primary-audio-player" controls preload="metadata"></audio>
           <p id="audio-status" class="hint">Select an audio file to render transforms.</p>
           <p id="audio-lock-status" class="hint"></p>
@@ -90,11 +91,16 @@ export function buildWorkbenchHtml(
         <select id="comparison-mode">
           <option value="none">None</option>
           <option value="side_by_side">Side-by-side</option>
+          <option value="stacked">Stacked</option>
           <option value="overlay">Overlay</option>
           <option value="side_by_side_difference">Side-by-side + difference</option>
+          <option value="stacked_difference">Stacked + difference</option>
         </select>
         <label class="row" for="comparison-audio">Second audio clip</label>
-        <input id="comparison-audio" type="file" accept=".wav,.flac,.mp3,.mpga,.mpeg,.ogg,.m4a" />
+        <input id="comparison-audio" type="file" accept=".wav,.flac,.mp3,.mpga,.mpeg,.ogg,.m4a,.aac,.opus,.sph" />
+        <label class="row" for="comparison-offset-seconds">Second clip time offset (s)</label>
+        <input id="comparison-offset-seconds" type="number" min="-30" max="30" step="0.01" />
+        <p id="comparison-status" class="hint">Load a second clip to enable comparison rendering.</p>
 
         <h2>Default Transform Hyperparameters</h2>
         <label class="row" for="stft-window-size">STFT window size</label>

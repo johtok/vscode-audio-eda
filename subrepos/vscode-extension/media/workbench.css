@@ -130,7 +130,8 @@ h2 {
 button,
 select,
 input[type="file"],
-input[type="color"] {
+input[type="color"],
+input[type="text"] {
   font: inherit;
   color: inherit;
 }
@@ -153,7 +154,8 @@ button:hover {
 
 select,
 input[type="file"],
-input[type="color"] {
+input[type="color"],
+input[type="text"] {
   width: 100%;
   border: 1px solid var(--vscode-input-border);
   background: var(--vscode-input-background);
@@ -283,6 +285,49 @@ input.is-locked {
   position: relative;
   border-radius: 6px;
   overflow: hidden;
+}
+
+.transform-comparison-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.transform-comparison-grid.mode-overlay {
+  grid-template-columns: 1fr;
+}
+
+.transform-comparison-grid.mode-stacked {
+  grid-template-columns: 1fr;
+  gap: 2px;
+}
+
+.transform-comparison-grid.mode-side_by_side {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.transform-comparison-grid.mode-side_by_side_difference {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.transform-comparison-grid.mode-stacked_difference {
+  grid-template-columns: 1fr;
+  gap: 2px;
+}
+
+.comparison-panel {
+  min-width: 0;
+}
+
+.comparison-panel-label {
+  margin: 0 0 4px;
+  font-size: 0.74rem;
+  color: var(--vscode-descriptionForeground);
+  font-weight: 600;
+}
+
+.transform-comparison-grid.mode-stacked .comparison-panel-label,
+.transform-comparison-grid.mode-stacked_difference .comparison-panel-label {
+  margin: 0 0 1px;
 }
 
 .transform-canvas {
@@ -423,6 +468,11 @@ input.is-locked {
 
 @media (max-width: 980px) {
   .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .transform-comparison-grid.mode-side_by_side,
+  .transform-comparison-grid.mode-side_by_side_difference {
     grid-template-columns: 1fr;
   }
 }

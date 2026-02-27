@@ -33,6 +33,8 @@ Delivery slices:
 
 Goal: add activation overlays on top of stacked views.
 
+Status: `implemented` (CSV parsing/validation + mode-aware rendering + diagnostics in panel).
+
 Modes:
 
 - `flag overlay` CSV columns: `t,flag`
@@ -47,6 +49,8 @@ Delivery slices:
 ## Phase 3: Comparison Modes (Priority 3)
 
 Goal: compare primary vs secondary audio in the stack UI.
+
+Status: `in progress` (second clip loading, side-by-side/overlay/difference rendering, and time-offset alignment implemented).
 
 Modes:
 

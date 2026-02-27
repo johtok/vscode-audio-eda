@@ -1,7 +1,12 @@
 import * as vscode from "vscode";
+import * as path from "path";
 
 import { AudioEdaCustomEditorProvider } from "./editor/audioEdaCustomEditorProvider";
-import { AudioEdaSidebarProvider, WorkspacePresetId } from "./sidebar/audioEdaSidebarProvider";
+import {
+  AudioEdaSidebarProvider,
+  RecentWorkspaceEntry,
+  WorkspacePresetId
+} from "./sidebar/audioEdaSidebarProvider";
 import { runToolboxJson, ToolboxInvocationError } from "./toolbox/toolboxCli";
 import { AudioWorkbenchPanel } from "./workbench/audioWorkbenchPanel";
 
@@ -20,6 +25,16 @@ const AUDIO_EXTENSIONS = new Set([
 
 const EXTENSION_ID = "local-dev.audio-eda-vscode";
 const WORKBENCH_STATE_KEY = "audioEda.workbenchState";
+const WORKBENCH_STATE_BY_AUDIO_KEY = "audioEda.workbenchStateByAudio";
+const RECENT_WORKSPACES_KEY = "audioEda.recentWorkspaces";
+const MAX_RECENT_WORKSPACES = 5;
+
+interface RecentWorkspaceRecord {
+  readonly uri: string;
+  readonly label: string;
+  readonly description?: string;
+  readonly timestamp: number;
+}
 
 function logJson(channel: vscode.OutputChannel, heading: string, payload: unknown): void {
   channel.appendLine(heading);
@@ -32,6 +47,86 @@ function getWorkspaceRoot(): string | undefined {
 
 function getConfig(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration("audioEda");
+}
+
+function sanitizeStateMap(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return {};
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    out[String(key)] = value;
+  }
+  return out;
+}
+
+function sanitizeRecentWorkspaceRecords(raw: unknown): RecentWorkspaceRecord[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  const deduped = new Map<string, RecentWorkspaceRecord>();
+  for (const item of raw) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+
+    const record = item as Partial<RecentWorkspaceRecord>;
+    if (typeof record.uri !== "string" || !record.uri.trim()) {
+      continue;
+    }
+
+    const uri = record.uri.trim();
+    let fallbackLabel = "audio";
+    try {
+      fallbackLabel = path.basename(vscode.Uri.parse(uri).path) || fallbackLabel;
+    } catch {
+      fallbackLabel = "audio";
+    }
+    const label =
+      typeof record.label === "string" && record.label.trim()
+        ? record.label.trim()
+        : fallbackLabel;
+    const description =
+      typeof record.description === "string" && record.description.trim()
+        ? record.description.trim()
+        : undefined;
+    const timestamp = Number.isFinite(Number(record.timestamp))
+      ? Number(record.timestamp)
+      : Date.now();
+
+    if (!deduped.has(uri)) {
+      deduped.set(uri, { uri, label, description, timestamp });
+    }
+  }
+
+  return Array.from(deduped.values())
+    .sort((left, right) => right.timestamp - left.timestamp)
+    .slice(0, MAX_RECENT_WORKSPACES);
+}
+
+function toRecentWorkspaceEntries(
+  records: readonly RecentWorkspaceRecord[]
+): RecentWorkspaceEntry[] {
+  return records.slice(0, MAX_RECENT_WORKSPACES).map((record) => ({
+    uri: record.uri,
+    label: record.label,
+    description: record.description
+  }));
+}
+
+function createRecentWorkspaceRecord(uri: vscode.Uri): RecentWorkspaceRecord {
+  const uriString = uri.toString();
+  const label = path.basename(uri.fsPath || uri.path);
+  const relativePath = vscode.workspace.asRelativePath(uri, false);
+  const description = relativePath && relativePath !== label ? relativePath : uri.fsPath || uri.path;
+  return {
+    uri: uriString,
+    label,
+    description,
+    timestamp: Date.now()
+  };
 }
 
 function isAudioUri(uri: vscode.Uri | undefined): uri is vscode.Uri {
@@ -122,18 +217,62 @@ export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Audio EDA");
   const sidebarProvider = new AudioEdaSidebarProvider();
   const reopenGuard = new Set<string>();
+
+  const loadStateMap = (): Record<string, unknown> =>
+    sanitizeStateMap(context.workspaceState.get<unknown>(WORKBENCH_STATE_BY_AUDIO_KEY));
+
+  const loadRecentWorkspaceRecords = (): RecentWorkspaceRecord[] =>
+    sanitizeRecentWorkspaceRecords(context.workspaceState.get<unknown>(RECENT_WORKSPACES_KEY));
+
+  const publishRecentWorkspaces = (records: readonly RecentWorkspaceRecord[]): void => {
+    sidebarProvider.setRecentWorkspaces(toRecentWorkspaceEntries(records));
+  };
+
+  const noteRecentWorkspace = async (uri: vscode.Uri): Promise<void> => {
+    if (!isAudioUri(uri)) {
+      return;
+    }
+
+    const current = loadRecentWorkspaceRecords();
+    const nextRecord = createRecentWorkspaceRecord(uri);
+    const merged = [nextRecord, ...current.filter((entry) => entry.uri !== nextRecord.uri)].slice(
+      0,
+      MAX_RECENT_WORKSPACES
+    );
+
+    await context.workspaceState.update(RECENT_WORKSPACES_KEY, merged);
+    publishRecentWorkspaces(merged);
+  };
+
   const workbenchStatePersistence = {
     load: (): unknown | undefined => context.workspaceState.get(WORKBENCH_STATE_KEY),
     save: (state: unknown): Thenable<void> =>
       context.workspaceState.update(WORKBENCH_STATE_KEY, state)
   };
 
+  const customEditorStatePersistence = {
+    loadForUri: (uri: vscode.Uri): unknown | undefined => {
+      const stateByAudio = loadStateMap();
+      const key = uri.toString();
+      return stateByAudio[key] ?? context.workspaceState.get(WORKBENCH_STATE_KEY);
+    },
+    saveForUri: async (uri: vscode.Uri, state: unknown): Promise<void> => {
+      const stateByAudio = loadStateMap();
+      stateByAudio[uri.toString()] = state;
+      await context.workspaceState.update(WORKBENCH_STATE_BY_AUDIO_KEY, stateByAudio);
+      await context.workspaceState.update(WORKBENCH_STATE_KEY, state);
+      await noteRecentWorkspace(uri);
+    },
+    noteRecentWorkspace
+  };
+
   const sidebarTree = vscode.window.registerTreeDataProvider("audioEdaSidebar", sidebarProvider);
+  publishRecentWorkspaces(loadRecentWorkspaceRecords());
   AudioWorkbenchPanel.configureStatePersistence(workbenchStatePersistence);
 
   const customEditorProvider = new AudioEdaCustomEditorProvider(
     context.extensionUri,
-    workbenchStatePersistence
+    customEditorStatePersistence
   );
   const customEditorRegistration = vscode.window.registerCustomEditorProvider(
     AudioEdaCustomEditorProvider.viewType,
@@ -160,11 +299,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
     try {
       await vscode.commands.executeCommand("vscode.openWith", uri, AudioEdaCustomEditorProvider.viewType);
+      await noteRecentWorkspace(uri);
       return true;
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       output.appendLine(`[openWith] fallback to panel for ${uri.fsPath}: ${message}`);
       AudioWorkbenchPanel.createOrShow(context.extensionUri, uri);
+      await noteRecentWorkspace(uri);
       return false;
     } finally {
       setTimeout(() => {
@@ -183,7 +324,10 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   context.subscriptions.push(
-    vscode.workspace.onDidChangeWorkspaceFolders(() => sidebarProvider.refresh()),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      publishRecentWorkspaces(loadRecentWorkspaceRecords());
+      sidebarProvider.refresh();
+    }),
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       maybeAutoOpenAudioEditor(editor?.document.uri);
     }),

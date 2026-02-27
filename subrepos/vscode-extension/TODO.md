@@ -11,8 +11,8 @@ Immediate tasks after template generation:
 - [x] Activity Bar view menu commands (refresh, toggle auto-open, settings, reopen)
 - [x] Wire baseline waveform/STFT/mel/MFCC/DCT/custom-filterbank rendering into stack rows
 - [x] Add per-view click/zoom/pan with animated scrollbars and playhead
-- [ ] Add CSV parser + schema validation for activation overlay modes
-- [ ] Add second-audio comparison mode processing (overlay/side-by-side/difference)
+- [x] Add CSV parser + schema validation for activation overlay modes
+- [x] Add second-audio comparison mode processing (overlay/side-by-side/difference)
 - [ ] Integrate toolbox metrics payloads with metrics panel cards/charts
 - [ ] Integrate feature computations (power/autocorrelation + short-time variants)
 - [ ] Add PCA backend API and PCA visualization widgets

@@ -8,7 +8,13 @@ export type TransformViewKind =
 
 export type ActivationOverlayMode = "flag" | "timestamped";
 
-export type ComparisonMode = "none" | "side_by_side" | "overlay" | "side_by_side_difference";
+export type ComparisonMode =
+  | "none"
+  | "side_by_side"
+  | "overlay"
+  | "side_by_side_difference"
+  | "stacked"
+  | "stacked_difference";
 
 export type PcaGoal = "eda" | "classification" | "denoising" | "doa_beamforming" | "enhancement";
 export type StftWindowType = "hann" | "hamming" | "blackman" | "rectangular";
@@ -46,11 +52,13 @@ export interface WorkbenchState {
     enabled: boolean;
     mode: ActivationOverlayMode;
     csvName: string | null;
+    csvText: string | null;
     flagColor: string;
   };
   comparison: {
     mode: ComparisonMode;
     secondAudioName: string | null;
+    offsetSeconds: number;
   };
   metrics: {
     audio: boolean;
@@ -139,11 +147,13 @@ export function createDefaultWorkbenchState(): WorkbenchState {
       enabled: false,
       mode: "flag",
       csvName: null,
+      csvText: null,
       flagColor: "#ef4444"
     },
     comparison: {
       mode: "none",
-      secondAudioName: null
+      secondAudioName: null,
+      offsetSeconds: 0
     },
     metrics: {
       audio: true,
