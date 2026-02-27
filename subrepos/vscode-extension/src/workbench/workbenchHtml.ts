@@ -217,14 +217,23 @@ export function buildWorkbenchHtml(
           <option value="enhancement">Enhancement</option>
         </select>
         <label class="row"><input id="pca-classwise" type="checkbox" /> Classwise PCA</label>
+        <label class="row" for="pca-components">Components (1-based)</label>
+        <input
+          id="pca-components"
+          type="text"
+          placeholder="e.g. 1,2,3 or 1-3 (empty = all)"
+        />
         <p id="pca-guidance" class="hint"></p>
 
         <h2>Multichannel</h2>
-        <label class="row"><input id="multichannel-enabled" type="checkbox" /> Enable multichannel mode</label>
-        <label class="row">
+        <label id="multichannel-enabled-row" class="row"><input id="multichannel-enabled" type="checkbox" /> Enable multichannel mode</label>
+        <label id="multichannel-split-row" class="row">
           <input id="multichannel-split" type="checkbox" />
           Split each view by channel
         </label>
+        <label id="multichannel-analysis-row" class="row" for="multichannel-analysis-channel">Single-channel analysis source</label>
+        <select id="multichannel-analysis-channel"></select>
+        <p id="multichannel-note" class="hint"></p>
       </section>
     </main>
     <script nonce="${nonce}">

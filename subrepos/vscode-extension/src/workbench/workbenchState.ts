@@ -82,10 +82,12 @@ export interface WorkbenchState {
     enabled: boolean;
     goal: PcaGoal;
     classwise: boolean;
+    componentSelection: string | null;
   };
   multichannel: {
     enabled: boolean;
     splitViewsByChannel: boolean;
+    analysisChannelIndex: number;
   };
   transformParams: {
     stft: {
@@ -179,11 +181,13 @@ export function createDefaultWorkbenchState(): WorkbenchState {
     pca: {
       enabled: false,
       goal: "eda",
-      classwise: false
+      classwise: false,
+      componentSelection: null
     },
     multichannel: {
       enabled: false,
-      splitViewsByChannel: true
+      splitViewsByChannel: true,
+      analysisChannelIndex: 0
     },
     transformParams: {
       stft: {

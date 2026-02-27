@@ -75,6 +75,11 @@
   const METRICS_ONSET_MIN_SPACING_SECONDS = 0.05;
   const METRICS_FRAME_SCAN_LIMIT = 6000;
   const METRICS_EXPORT_MAX_ROWS = 200000;
+  const MAX_PCA_FRAMES = 1200;
+  const MAX_PCA_FEATURES = 96;
+  const MAX_PCA_COMPONENTS = 6;
+  const PCA_POWER_ITERATIONS = 24;
+  const PCA_VIRTUAL_VIEW_ID = "__pca_feature_view__";
   const DEFAULT_TRANSFORM_PARAMS = {
     stft: {
       mode: "magnitude",
@@ -135,8 +140,8 @@
       shortTimePower: false,
       shortTimeAutocorrelation: false
     },
-    pca: { enabled: false, goal: "eda", classwise: false },
-    multichannel: { enabled: false, splitViewsByChannel: true },
+    pca: { enabled: false, goal: "eda", classwise: false, componentSelection: null },
+    multichannel: { enabled: false, splitViewsByChannel: true, analysisChannelIndex: 0 },
     transformParams: DEFAULT_TRANSFORM_PARAMS
   };
 
@@ -211,10 +216,16 @@
   const pcaEnabled = byId("pca-enabled");
   const pcaGoal = byId("pca-goal");
   const pcaClasswise = byId("pca-classwise");
+  const pcaComponents = byId("pca-components");
   const pcaGuidance = byId("pca-guidance");
 
   const multichannelEnabled = byId("multichannel-enabled");
   const multichannelSplit = byId("multichannel-split");
+  const multichannelAnalysisChannel = byId("multichannel-analysis-channel");
+  const multichannelNote = byId("multichannel-note");
+  const multichannelEnabledRow = byId("multichannel-enabled-row");
+  const multichannelSplitRow = byId("multichannel-split-row");
+  const multichannelAnalysisRow = byId("multichannel-analysis-row");
 
   let dragIndex = null;
   let primaryAudio = null;
@@ -552,6 +563,7 @@
         merged.pca.enabled = sanitizeBooleanValue(pca.enabled, merged.pca.enabled);
         merged.pca.goal = sanitizePcaGoal(pca.goal, merged.pca.goal);
         merged.pca.classwise = sanitizeBooleanValue(pca.classwise, merged.pca.classwise);
+        merged.pca.componentSelection = sanitizeStringValue(pca.componentSelection, 128);
       }
 
       const multichannel = asRecord(restoredState.multichannel);
@@ -563,6 +575,12 @@
         merged.multichannel.splitViewsByChannel = sanitizeBooleanValue(
           multichannel.splitViewsByChannel,
           merged.multichannel.splitViewsByChannel
+        );
+        merged.multichannel.analysisChannelIndex = sanitizeInt(
+          multichannel.analysisChannelIndex,
+          merged.multichannel.analysisChannelIndex,
+          -1,
+          63
         );
       }
 
@@ -759,8 +777,13 @@
       dctByKey: Object.create(null),
       tempogramByKey: Object.create(null),
       fourierTempogramByKey: Object.create(null),
+      pcaByKey: Object.create(null),
       customFilterbankByKey: Object.create(null)
     };
+  }
+
+  function getPcaVirtualViewId() {
+    return PCA_VIRTUAL_VIEW_ID + "::" + state.pca.goal;
   }
 
   function clearDerivedCache() {
@@ -1219,9 +1242,9 @@
     pcaEnabled.checked = state.pca.enabled;
     pcaGoal.value = state.pca.goal;
     pcaClasswise.checked = state.pca.classwise;
+    pcaComponents.value = state.pca.componentSelection || "";
 
-    multichannelEnabled.checked = state.multichannel.enabled;
-    multichannelSplit.checked = state.multichannel.splitViewsByChannel;
+    updateMultichannelControlsFromAudio();
 
     syncTransformParamControls();
     updateOverlayCsvHint();
@@ -2537,13 +2560,14 @@
   }
 
   function getPrimaryMetricsReport() {
-    if (!primaryAudio || !primaryAudio.samples || primaryAudio.samples.length === 0) {
+    const analysisAudio = getSingleChannelAnalysisAudio();
+    if (!analysisAudio || !analysisAudio.samples || analysisAudio.samples.length === 0) {
       return null;
     }
 
     const histogramConfig = getMetricsHistogramConfig();
     const cacheKey =
-      metricsAudioKey(primaryAudio) +
+      metricsAudioKey(analysisAudio) +
       "::hist::" +
       histogramConfig.bins +
       "::" +
@@ -2554,7 +2578,7 @@
       return metricsCache.report;
     }
 
-    const report = computeMetricsReport(primaryAudio);
+    const report = computeMetricsReport(analysisAudio);
     metricsCache = { cacheKey, report };
     return report;
   }
@@ -2835,10 +2859,11 @@
       return;
     }
     const report = getPrimaryMetricsReport();
+    const analysisAudio = getSingleChannelAnalysisAudio();
     const histogramConfig = getMetricsHistogramConfig();
     const widthSignature = Math.round(metricsHistogramCanvas.clientWidth || 0);
     const signature =
-      (report ? metricsAudioKey(primaryAudio) : "none") +
+      (report ? metricsAudioKey(analysisAudio) : "none") +
       "|" +
       widthSignature +
       "|" +
@@ -2878,7 +2903,10 @@
       report.sampleCount +
       " samples (" +
       formatMetricNumber(report.audio.durationSeconds, 3) +
-      " s).";
+      " s)." +
+      (primaryAudio && getAudioChannelCount(primaryAudio) > 1
+        ? " Source: " + getSingleChannelAnalysisLabel() + "."
+        : "");
 
     if (state.metrics.audio) {
       const timeRows = [
@@ -3564,6 +3592,9 @@
     const liveIds = new Set(state.stack.map(function (item) {
       return item.id;
     }));
+    if (state.pca.enabled) {
+      liveIds.add(getPcaVirtualViewId());
+    }
 
     Object.keys(viewStateById).forEach(function (id) {
       if (!liveIds.has(id)) {
@@ -3704,6 +3735,7 @@
     if (!file) {
       primaryAudio = null;
       clearDerivedCache();
+      updateMultichannelControlsFromAudio();
       setAudioStatus("Select an audio file to render transforms.");
       renderTransformStack();
       postState();
@@ -3753,6 +3785,7 @@
     setPrimaryAudioInputLocked(lockInput, sourceName);
     clearDerivedCache();
     syncTransformParamControls();
+    updateMultichannelControlsFromAudio();
 
     setAudioStatus(
       "Loaded " +
@@ -3784,6 +3817,7 @@
     setPrimaryAudioInputLocked(lockInput, sourceName);
     clearDerivedCache();
     syncTransformParamControls();
+    updateMultichannelControlsFromAudio();
     setAudioStatus("Loaded " + sourceName + " (playback only). " + reason);
 
     void reparseOverlayCsvIfPresent();
@@ -3893,16 +3927,13 @@
       const totalSamples = decoded.length;
       const channelCount = decodedChannels;
       const mono = new Float32Array(totalSamples);
-      let firstChannel = null;
-      let secondChannel = null;
+      const channels = new Array(channelCount);
 
       for (let channel = 0; channel < channelCount; channel += 1) {
-        const channelData = decoded.getChannelData(channel);
-        if (channel === 0) {
-          firstChannel = channelData;
-        } else if (channel === 1) {
-          secondChannel = channelData;
-        }
+        const sourceChannel = decoded.getChannelData(channel);
+        const channelData = new Float32Array(totalSamples);
+        channelData.set(sourceChannel);
+        channels[channel] = channelData;
         for (let index = 0; index < totalSamples; index += 1) {
           mono[index] += channelData[index];
         }
@@ -3913,8 +3944,8 @@
       }
 
       const spatialSummary =
-        firstChannel && secondChannel
-          ? summarizeStereoSpatial(firstChannel, secondChannel, decoded.sampleRate)
+        channels.length >= 2
+          ? summarizeStereoSpatial(channels[0], channels[1], decoded.sampleRate)
           : null;
 
       return {
@@ -3933,6 +3964,7 @@
         channelCount,
         duration: decoded.duration,
         samples: mono,
+        channels,
         spatialSummary
       };
     } finally {
@@ -4226,6 +4258,174 @@
     );
   }
 
+  function getAudioChannelCount(audioData) {
+    if (!audioData) {
+      return 1;
+    }
+
+    if (Array.isArray(audioData.channels) && audioData.channels.length > 0) {
+      return audioData.channels.length;
+    }
+
+    return sanitizeInt(audioData.channelCount, 1, 1, 64);
+  }
+
+  function getAudioDataForChannel(audioData, channelIndex) {
+    if (!audioData || !Array.isArray(audioData.channels) || audioData.channels.length <= 1) {
+      return audioData;
+    }
+
+    const boundedIndex = clamp(channelIndex, 0, audioData.channels.length - 1);
+    const channelSamples = audioData.channels[boundedIndex];
+
+    return {
+      audioKey: (audioData.audioKey || audioData.fileName || "audio") + "::ch" + boundedIndex,
+      fileName: audioData.fileName,
+      sampleRate: audioData.sampleRate,
+      channelCount: 1,
+      duration: audioData.duration,
+      samples: channelSamples,
+      channels: [channelSamples],
+      spatialSummary: null,
+      sourceChannelIndex: boundedIndex,
+      sourceChannelCount: getAudioChannelCount(audioData)
+    };
+  }
+
+  function getSelectedAnalysisChannelIndex(channelCount) {
+    const maxChannelIndex = Math.max(-1, channelCount - 1);
+    return sanitizeInt(state.multichannel.analysisChannelIndex, 0, -1, maxChannelIndex);
+  }
+
+  function getSingleChannelAnalysisAudio() {
+    if (!primaryAudio) {
+      return null;
+    }
+
+    const channelCount = getAudioChannelCount(primaryAudio);
+    if (channelCount <= 1) {
+      state.multichannel.analysisChannelIndex = 0;
+      return primaryAudio;
+    }
+
+    const channelIndex = getSelectedAnalysisChannelIndex(channelCount);
+    state.multichannel.analysisChannelIndex = channelIndex;
+    if (channelIndex < 0) {
+      return primaryAudio;
+    }
+
+    return getAudioDataForChannel(primaryAudio, channelIndex);
+  }
+
+  function getSingleChannelAnalysisLabel() {
+    if (!primaryAudio) {
+      return "mixdown";
+    }
+
+    const channelCount = getAudioChannelCount(primaryAudio);
+    if (channelCount <= 1) {
+      return "channel 1";
+    }
+
+    const channelIndex = getSelectedAnalysisChannelIndex(channelCount);
+    if (channelIndex < 0) {
+      return "mixdown";
+    }
+
+    return "channel " + (channelIndex + 1);
+  }
+
+  function updateMultichannelControlsFromAudio() {
+    function syncRowDisabledStyle() {
+      multichannelEnabledRow.classList.toggle("is-disabled", multichannelEnabled.disabled);
+      multichannelSplitRow.classList.toggle("is-disabled", multichannelSplit.disabled);
+      multichannelAnalysisRow.classList.toggle("is-disabled", multichannelAnalysisChannel.disabled);
+      multichannelNote.classList.toggle(
+        "is-disabled",
+        multichannelEnabled.disabled && multichannelSplit.disabled && multichannelAnalysisChannel.disabled
+      );
+    }
+
+    const channelCount = primaryAudio ? getAudioChannelCount(primaryAudio) : 0;
+    const hasMultichannel = channelCount > 1;
+    const hasAudio = Boolean(primaryAudio);
+
+    multichannelAnalysisChannel.innerHTML = "";
+
+    if (!hasMultichannel) {
+      state.multichannel.enabled = false;
+      multichannelEnabled.checked = false;
+      multichannelSplit.checked = state.multichannel.splitViewsByChannel;
+      multichannelEnabled.disabled = hasAudio;
+      multichannelSplit.disabled = true;
+
+      const placeholderOption = document.createElement("option");
+      placeholderOption.value = "0";
+      placeholderOption.textContent = hasAudio ? "Channel 1" : "Load audio first";
+      multichannelAnalysisChannel.appendChild(placeholderOption);
+      multichannelAnalysisChannel.value = "0";
+      multichannelAnalysisChannel.disabled = true;
+      state.multichannel.analysisChannelIndex = 0;
+
+      if (!hasAudio) {
+        multichannelNote.textContent = "Load a multichannel clip to enable multichannel controls.";
+      } else {
+        multichannelNote.textContent =
+          "Single-channel clip detected. Multichannel mode is unavailable for this file.";
+      }
+      syncRowDisabledStyle();
+      return;
+    }
+
+    multichannelEnabled.disabled = false;
+    multichannelEnabled.checked = state.multichannel.enabled;
+    multichannelSplit.checked = state.multichannel.splitViewsByChannel;
+    multichannelSplit.disabled = !state.multichannel.enabled;
+
+    const selectedChannelIndex = getSelectedAnalysisChannelIndex(channelCount);
+    state.multichannel.analysisChannelIndex = selectedChannelIndex;
+
+    for (let channel = 0; channel < channelCount; channel += 1) {
+      const option = document.createElement("option");
+      option.value = String(channel);
+      option.textContent = "Channel " + (channel + 1);
+      multichannelAnalysisChannel.appendChild(option);
+    }
+    const mixdownOption = document.createElement("option");
+    mixdownOption.value = "-1";
+    mixdownOption.textContent = "Mixdown (all channels)";
+    multichannelAnalysisChannel.appendChild(mixdownOption);
+
+    multichannelAnalysisChannel.disabled = false;
+    multichannelAnalysisChannel.value = String(selectedChannelIndex);
+
+    const label = getSingleChannelAnalysisLabel();
+    if (state.multichannel.enabled) {
+      multichannelNote.textContent = state.multichannel.splitViewsByChannel
+        ? "Note: metrics and PCA use " +
+          label +
+          " for single-channel analysis. Split transform views remain channel-wise."
+        : "Note: feature cards, metrics, and PCA use " +
+          label +
+          " for single-channel analysis.";
+    } else {
+      multichannelNote.textContent = "Single-channel analysis source: " + label + ".";
+    }
+
+    syncRowDisabledStyle();
+  }
+
+  function shouldRenderSplitChannels(activeComparisonMode) {
+    return Boolean(
+      activeComparisonMode === "none" &&
+        primaryAudio &&
+        state.multichannel &&
+        state.multichannel.enabled &&
+        state.multichannel.splitViewsByChannel &&
+        getAudioChannelCount(primaryAudio) > 1
+    );
+  }
+
   function ensureStftForAudio(item, audioData, cache) {
     if (!audioData) {
       throw new Error("Select an audio file first.");
@@ -4259,7 +4459,7 @@
   }
 
   function ensureStft(item) {
-    return ensureStftForAudio(item, primaryAudio, derivedCache);
+    return ensureStftForAudio(item, getSingleChannelAnalysisAudio(), derivedCache);
   }
 
   function computeStft(samples, sampleRate, fftSize, hopSize, maxFrames, windowType) {
@@ -4436,7 +4636,7 @@
   }
 
   function ensureMel(item) {
-    return ensureMelForAudio(item, primaryAudio, derivedCache);
+    return ensureMelForAudio(item, getSingleChannelAnalysisAudio(), derivedCache);
   }
 
   function createMelFilterbank(sampleRate, fftSize, melBands, minHz, maxHz) {
@@ -4559,7 +4759,7 @@
   }
 
   function ensureMfcc(item) {
-    return ensureMfccForAudio(item, primaryAudio, derivedCache);
+    return ensureMfccForAudio(item, getSingleChannelAnalysisAudio(), derivedCache);
   }
 
   function ensureDctForAudio(item, audioData, cache) {
@@ -4583,7 +4783,7 @@
   }
 
   function ensureDct(item) {
-    return ensureDctForAudio(item, primaryAudio, derivedCache);
+    return ensureDctForAudio(item, getSingleChannelAnalysisAudio(), derivedCache);
   }
 
   function ensureOnsetEnvelopeForAudio(item, audioData, cache) {
@@ -4782,7 +4982,7 @@
   }
 
   function ensureTempogram(item) {
-    return ensureTempogramForAudio(item, primaryAudio, derivedCache);
+    return ensureTempogramForAudio(item, getSingleChannelAnalysisAudio(), derivedCache);
   }
 
   function ensureFourierTempogramForAudio(item, audioData, cache) {
@@ -4808,7 +5008,538 @@
   }
 
   function ensureFourierTempogram(item) {
-    return ensureFourierTempogramForAudio(item, primaryAudio, derivedCache);
+    return ensureFourierTempogramForAudio(item, getSingleChannelAnalysisAudio(), derivedCache);
+  }
+
+  function createPcaReferenceItem(kind) {
+    return {
+      id: "__pca_source__" + kind,
+      kind,
+      params: createDefaultParamsForKind(kind, kind === "stft" ? "magnitude" : undefined)
+    };
+  }
+
+  function buildSsaFeatureRows(samples, sampleRate) {
+    const safeSampleRate = Math.max(1, sampleRate);
+    const lag = clamp(Math.round(safeSampleRate * 0.03), 32, 192);
+    const hop = Math.max(1, Math.round(lag / 4));
+    const targetFeatures = Math.min(MAX_PCA_FEATURES, 96);
+    const window = createWindow(lag, "hann");
+    const totalFrames = Math.max(1, Math.floor((Math.max(samples.length, lag) - lag) / hop) + 1);
+    const frameStride = Math.max(1, Math.floor(totalFrames / MAX_PCA_FRAMES));
+    const rows = [];
+
+    for (let frame = 0; frame < totalFrames; frame += frameStride) {
+      const offset = frame * hop;
+      const row = new Float32Array(lag);
+      let mean = 0;
+      for (let index = 0; index < lag; index += 1) {
+        const sampleIndex = offset + index;
+        const value = sampleIndex < samples.length ? samples[sampleIndex] : 0;
+        mean += value;
+        row[index] = value;
+      }
+      mean /= lag;
+      for (let index = 0; index < lag; index += 1) {
+        row[index] = (row[index] - mean) * window[index];
+      }
+      rows.push(lag > targetFeatures ? resampleVectorToLength(row, targetFeatures) : row);
+    }
+
+    return {
+      rows,
+      sourceDescription: "SSA lag-embedded waveform windows (" + lag + " samples).",
+      sourceNote: "Lag embedding approximates SSA-style PCA for denoising/structure analysis."
+    };
+  }
+
+  function preparePcaInputRows(rawRows) {
+    if (!Array.isArray(rawRows) || rawRows.length === 0) {
+      return {
+        rows: [],
+        rowStride: 1,
+        originalRowCount: 0,
+        originalColCount: 0,
+        colCount: 0
+      };
+    }
+
+    const first = rawRows[0];
+    const sourceColCount = first && typeof first.length === "number" ? first.length : 0;
+    if (!sourceColCount) {
+      return {
+        rows: [],
+        rowStride: 1,
+        originalRowCount: rawRows.length,
+        originalColCount: 0,
+        colCount: 0
+      };
+    }
+
+    const rowStride = Math.max(1, Math.floor(rawRows.length / MAX_PCA_FRAMES));
+    const targetColCount = Math.min(MAX_PCA_FEATURES, sourceColCount);
+    const preparedRows = [];
+
+    for (let rowIndex = 0; rowIndex < rawRows.length; rowIndex += rowStride) {
+      const source = rawRows[rowIndex];
+      if (!source || typeof source.length !== "number" || source.length < 2) {
+        continue;
+      }
+
+      let row;
+      if (source.length > targetColCount) {
+        row = resampleVectorToLength(source, targetColCount);
+      } else if (source.length < targetColCount) {
+        row = new Float32Array(targetColCount);
+        for (let index = 0; index < source.length; index += 1) {
+          row[index] = source[index];
+        }
+      } else {
+        row = new Float32Array(source.length);
+        row.set(source);
+      }
+      preparedRows.push(row);
+    }
+
+    return {
+      rows: preparedRows,
+      rowStride,
+      originalRowCount: rawRows.length,
+      originalColCount: sourceColCount,
+      colCount: preparedRows.length ? preparedRows[0].length : 0
+    };
+  }
+
+  function buildMagnitudeLoadingsFromMelLoadings(melLoadings, filterbank) {
+    if (!filterbank || !filterbank.length) {
+      return new Float32Array(1);
+    }
+    const binCount = filterbank[0].length;
+    const out = new Float32Array(binCount);
+    const count = Math.min(melLoadings.length, filterbank.length);
+    for (let melIndex = 0; melIndex < count; melIndex += 1) {
+      const coefficient = melLoadings[melIndex];
+      const weights = filterbank[melIndex];
+      for (let bin = 0; bin < binCount; bin += 1) {
+        out[bin] += coefficient * weights[bin];
+      }
+    }
+    return out;
+  }
+
+  function buildMelLoadingsFromMagnitudeLoadings(magnitudeLoadings, filterbank) {
+    if (!filterbank || !filterbank.length) {
+      return new Float32Array(1);
+    }
+    const out = new Float32Array(filterbank.length);
+    for (let melIndex = 0; melIndex < filterbank.length; melIndex += 1) {
+      const weights = filterbank[melIndex];
+      let sum = 0;
+      for (let bin = 0; bin < weights.length && bin < magnitudeLoadings.length; bin += 1) {
+        sum += magnitudeLoadings[bin] * weights[bin];
+      }
+      out[melIndex] = sum;
+    }
+    return out;
+  }
+
+  function nextPowerOfTwo(value) {
+    let n = 1;
+    while (n < value) {
+      n *= 2;
+    }
+    return n;
+  }
+
+  function buildMagnitudeSpectrumFromTimeVector(timeVector, preferredFftSize) {
+    const sourceLength = Math.max(1, timeVector.length);
+    const nfft = Math.max(
+      32,
+      nextPowerOfTwo(Math.max(sourceLength, preferredFftSize || sourceLength))
+    );
+    const re = new Float64Array(nfft);
+    const im = new Float64Array(nfft);
+    let mean = 0;
+    for (let index = 0; index < sourceLength; index += 1) {
+      mean += timeVector[index];
+    }
+    mean /= sourceLength;
+    for (let index = 0; index < sourceLength; index += 1) {
+      re[index] = timeVector[index] - mean;
+    }
+
+    fftInPlace(re, im);
+    const binCount = nfft / 2 + 1;
+    const magnitude = new Float32Array(binCount);
+    for (let bin = 0; bin < binCount; bin += 1) {
+      magnitude[bin] = Math.hypot(re[bin], im[bin]);
+    }
+
+    return {
+      magnitude,
+      fftSize: nfft
+    };
+  }
+
+  function buildTimeVectorFromSpectrumLoadings(magnitudeLoadings, fftSize) {
+    const nfft = Math.max(32, nextPowerOfTwo(Math.max(2, fftSize || (magnitudeLoadings.length - 1) * 2)));
+    const binCount = Math.min(magnitudeLoadings.length, nfft / 2 + 1);
+    const re = new Float64Array(nfft);
+    const im = new Float64Array(nfft);
+
+    for (let bin = 0; bin < binCount; bin += 1) {
+      const value = magnitudeLoadings[bin];
+      re[bin] = value;
+      im[bin] = 0;
+      if (bin > 0 && bin < nfft / 2) {
+        re[nfft - bin] = value;
+        im[nfft - bin] = 0;
+      }
+    }
+
+    for (let index = 0; index < nfft; index += 1) {
+      im[index] = -im[index];
+    }
+    fftInPlace(re, im);
+
+    const out = new Float32Array(nfft);
+    for (let index = 0; index < nfft; index += 1) {
+      out[index] = re[index] / nfft;
+    }
+    return out;
+  }
+
+  function dotProductDense(a, b) {
+    let sum = 0;
+    for (let index = 0; index < a.length; index += 1) {
+      sum += a[index] * b[index];
+    }
+    return sum;
+  }
+
+  function normalizeDense(vector) {
+    const norm = Math.sqrt(Math.max(0, dotProductDense(vector, vector)));
+    if (norm <= 1e-12) {
+      return false;
+    }
+    for (let index = 0; index < vector.length; index += 1) {
+      vector[index] /= norm;
+    }
+    return true;
+  }
+
+  function covarianceTimesVector(centeredRows, vector) {
+    const rowCount = centeredRows.length;
+    const colCount = vector.length;
+    const projection = new Float64Array(rowCount);
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      projection[rowIndex] = dotProductDense(centeredRows[rowIndex], vector);
+    }
+
+    const output = new Float64Array(colCount);
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      const row = centeredRows[rowIndex];
+      const weight = projection[rowIndex];
+      for (let colIndex = 0; colIndex < colCount; colIndex += 1) {
+        output[colIndex] += row[colIndex] * weight;
+      }
+    }
+
+    const scale = 1 / Math.max(1, rowCount - 1);
+    for (let colIndex = 0; colIndex < colCount; colIndex += 1) {
+      output[colIndex] *= scale;
+    }
+
+    return output;
+  }
+
+  function computePcaProjection(rows, maxComponents) {
+    const rowCount = rows.length;
+    const colCount = rows[0] ? rows[0].length : 0;
+    if (rowCount < 2 || colCount < 2) {
+      throw new Error("Not enough data for PCA.");
+    }
+
+    const means = new Float64Array(colCount);
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      const row = rows[rowIndex];
+      for (let colIndex = 0; colIndex < colCount; colIndex += 1) {
+        means[colIndex] += row[colIndex];
+      }
+    }
+    for (let colIndex = 0; colIndex < colCount; colIndex += 1) {
+      means[colIndex] /= rowCount;
+    }
+
+    const centeredRows = new Array(rowCount);
+    let totalVariance = 0;
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      const centered = new Float64Array(colCount);
+      const source = rows[rowIndex];
+      for (let colIndex = 0; colIndex < colCount; colIndex += 1) {
+        const value = source[colIndex] - means[colIndex];
+        centered[colIndex] = value;
+      }
+      centeredRows[rowIndex] = centered;
+    }
+
+    for (let colIndex = 0; colIndex < colCount; colIndex += 1) {
+      let varianceAccum = 0;
+      for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+        const value = centeredRows[rowIndex][colIndex];
+        varianceAccum += value * value;
+      }
+      totalVariance += varianceAccum / Math.max(1, rowCount - 1);
+    }
+
+    const componentVectors = [];
+    const eigenvalues = [];
+    const componentLimit = Math.max(1, Math.min(maxComponents, colCount, rowCount - 1));
+
+    for (let componentIndex = 0; componentIndex < componentLimit; componentIndex += 1) {
+      const vector = new Float64Array(colCount);
+      for (let colIndex = 0; colIndex < colCount; colIndex += 1) {
+        vector[colIndex] =
+          Math.sin((colIndex + 1) * (componentIndex + 1) * 1.61803) +
+          Math.cos((colIndex + 1) * (componentIndex + 1) * 0.61803);
+      }
+      if (!normalizeDense(vector)) {
+        break;
+      }
+
+      for (let iter = 0; iter < PCA_POWER_ITERATIONS; iter += 1) {
+        const nextVector = covarianceTimesVector(centeredRows, vector);
+        for (let prev = 0; prev < componentVectors.length; prev += 1) {
+          const basis = componentVectors[prev];
+          const projection = dotProductDense(nextVector, basis);
+          for (let colIndex = 0; colIndex < colCount; colIndex += 1) {
+            nextVector[colIndex] -= projection * basis[colIndex];
+          }
+        }
+
+        if (!normalizeDense(nextVector)) {
+          break;
+        }
+
+        for (let colIndex = 0; colIndex < colCount; colIndex += 1) {
+          vector[colIndex] = nextVector[colIndex];
+        }
+      }
+
+      const covarianceVector = covarianceTimesVector(centeredRows, vector);
+      const eigenvalue = Math.max(0, dotProductDense(vector, covarianceVector));
+      if (!Number.isFinite(eigenvalue) || eigenvalue <= 1e-10) {
+        break;
+      }
+
+      componentVectors.push(vector);
+      eigenvalues.push(eigenvalue);
+    }
+
+    if (componentVectors.length === 0) {
+      throw new Error("PCA failed to find stable components.");
+    }
+
+    const projectionMatrix = new Array(rowCount);
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      const rowProjection = new Float32Array(componentVectors.length);
+      for (let componentIndex = 0; componentIndex < componentVectors.length; componentIndex += 1) {
+        rowProjection[componentIndex] = dotProductDense(
+          centeredRows[rowIndex],
+          componentVectors[componentIndex]
+        );
+      }
+      projectionMatrix[rowIndex] = rowProjection;
+    }
+
+    const explainedRatios = eigenvalues.map(function (value) {
+      return totalVariance > 1e-12 ? value / totalVariance : 0;
+    });
+
+    return {
+      projectionMatrix,
+      componentCount: componentVectors.length,
+      componentVectors: componentVectors.map(function (vector) {
+        const out = new Float32Array(vector.length);
+        for (let index = 0; index < vector.length; index += 1) {
+          out[index] = vector[index];
+        }
+        return out;
+      }),
+      explainedRatios,
+      totalVariance
+    };
+  }
+
+  function ensurePcaViewForAudio(audioData, cache) {
+    if (!audioData) {
+      throw new Error("Load the primary clip to compute PCA.");
+    }
+
+    const goal = state.pca.goal;
+    const stftDefaults = getDefaultStftParams();
+    const melDefaults = getDefaultMelParams(audioData.sampleRate || 16000);
+    const cacheKey =
+      getAudioCachePrefix(audioData) +
+      "::pca::" +
+      goal +
+      "::" +
+      state.pca.classwise +
+      "::" +
+      stftParamsToKey(stftDefaults) +
+      "::" +
+      melParamsToKey(melDefaults);
+
+    if (cache.pcaByKey[cacheKey]) {
+      return cache.pcaByKey[cacheKey];
+    }
+
+    let sourceRows = [];
+    let sourceDescription = "";
+    let sourceNote = "";
+    let spectrumAxisLabel = "Feature bin";
+    let sourceType = "mel";
+    let melFilterbank = null;
+    let stftFftSize = 0;
+    let stftBinCount = 0;
+    let durationSeconds = audioData.duration;
+
+    if (goal === "denoising") {
+      const ssa = buildSsaFeatureRows(audioData.samples, audioData.sampleRate);
+      sourceRows = ssa.rows;
+      sourceDescription = ssa.sourceDescription;
+      sourceNote = ssa.sourceNote;
+      spectrumAxisLabel = "Lag bin";
+      sourceType = "lag";
+    } else {
+      const melItem = createPcaReferenceItem("mel");
+      melItem.params.stft = cloneParams(stftDefaults);
+      melItem.params.mel = cloneParams(melDefaults);
+      const mel = ensureMelForAudio(melItem, audioData, cache);
+      const stft = ensureStftForAudio(melItem, audioData, cache);
+      sourceRows = mel.matrix;
+      durationSeconds = mel.durationSeconds;
+      sourceDescription =
+        "Log-mel spectra (" +
+        mel.bands +
+        " bands, " +
+        Math.round(mel.minHz) +
+        "-" +
+        Math.round(mel.maxHz) +
+        " Hz).";
+      spectrumAxisLabel = "Mel bin";
+      melFilterbank = createMelFilterbank(
+        stft.sampleRate,
+        stft.fftSize,
+        melDefaults.bands,
+        melDefaults.minHz,
+        melDefaults.maxHz
+      );
+      stftFftSize = stft.fftSize;
+      stftBinCount = stft.binCount;
+      if (goal === "doa_beamforming" || goal === "enhancement") {
+        sourceNote =
+          "Array covariance PCA requires channel-wise STFT; showing mono log-mel PCA fallback.";
+      }
+    }
+
+    const prepared = preparePcaInputRows(sourceRows);
+    if (prepared.rows.length < 2 || prepared.colCount < 2) {
+      throw new Error("Not enough frames/features for PCA. Increase analysis window or load longer audio.");
+    }
+
+    const pca = computePcaProjection(prepared.rows, MAX_PCA_COMPONENTS);
+    const explainedSummary = pca.explainedRatios
+      .map(function (value, index) {
+        return "PC" + (index + 1) + "=" + formatMetricPercent(value);
+      })
+      .join(", ");
+    const classwiseNote = state.pca.classwise
+      ? "Classwise PCA requested; labels are unavailable, showing global PCA."
+      : "";
+    const notes = [sourceNote, classwiseNote].filter(Boolean).join(" ");
+
+    const componentMelLoadings = [];
+    const componentMagnitudeLoadings = [];
+    const componentTimeVectors = [];
+
+    if (sourceType === "mel") {
+      for (let compIndex = 0; compIndex < pca.componentVectors.length; compIndex += 1) {
+        const sourceVector = pca.componentVectors[compIndex];
+        const melVector =
+          sourceVector.length === melDefaults.bands
+            ? sourceVector
+            : resampleVectorToLength(sourceVector, melDefaults.bands);
+        const magnitudeVector = melFilterbank
+          ? buildMagnitudeLoadingsFromMelLoadings(melVector, melFilterbank)
+          : new Float32Array(stftBinCount || 1);
+        const timeVector = buildTimeVectorFromSpectrumLoadings(
+          magnitudeVector,
+          stftFftSize || 256
+        );
+
+        componentMelLoadings.push(melVector);
+        componentMagnitudeLoadings.push(magnitudeVector);
+        componentTimeVectors.push(timeVector);
+      }
+    } else {
+      const denoiseFftSize = nextPowerOfTwo(
+        Math.max(64, (pca.componentVectors[0] ? pca.componentVectors[0].length : 64) * 2)
+      );
+      const denoiseFilterbank = createMelFilterbank(
+        audioData.sampleRate || 16000,
+        denoiseFftSize,
+        melDefaults.bands,
+        melDefaults.minHz,
+        melDefaults.maxHz
+      );
+
+      for (let compIndex = 0; compIndex < pca.componentVectors.length; compIndex += 1) {
+        const sourceVector = pca.componentVectors[compIndex];
+        const timeVector = new Float32Array(sourceVector.length);
+        timeVector.set(sourceVector);
+        const magnitudeSpectrum = buildMagnitudeSpectrumFromTimeVector(sourceVector, denoiseFftSize);
+        const melVector = buildMelLoadingsFromMagnitudeLoadings(
+          magnitudeSpectrum.magnitude,
+          denoiseFilterbank
+        );
+
+        componentMelLoadings.push(melVector);
+        componentMagnitudeLoadings.push(magnitudeSpectrum.magnitude);
+        componentTimeVectors.push(timeVector);
+      }
+    }
+
+    const result = {
+      cacheKey,
+      matrix: pca.projectionMatrix,
+      componentCount: pca.componentCount,
+      explainedRatios: pca.explainedRatios,
+      explainedSummary,
+      rowStride: prepared.rowStride,
+      originalRows: prepared.originalRowCount,
+      originalCols: prepared.originalColCount,
+      usedRows: prepared.rows.length,
+      usedCols: prepared.colCount,
+      sourceDescription,
+      spectrumAxisLabel,
+      melAxisLabel: "Mel bin",
+      magnitudeAxisLabel: "Magnitude spectrum bin",
+      timeAxisLabel: sourceType === "lag" ? "Lag sample" : "Time sample",
+      note: notes,
+      durationSeconds,
+      componentVectors: pca.componentVectors,
+      componentMelLoadings,
+      componentMagnitudeLoadings,
+      componentTimeVectors
+    };
+
+    cache.pcaByKey[cacheKey] = result;
+    return result;
+  }
+
+  function ensurePcaView() {
+    return ensurePcaViewForAudio(getSingleChannelAnalysisAudio(), derivedCache);
   }
 
   function ensureCustomFilterbankForAudio(item, audioData, cache) {
@@ -4839,7 +5570,7 @@
   }
 
   function ensureCustomFilterbank(item) {
-    return ensureCustomFilterbankForAudio(item, primaryAudio, derivedCache);
+    return ensureCustomFilterbankForAudio(item, getSingleChannelAnalysisAudio(), derivedCache);
   }
 
   function dctRows(matrix, coeffCount) {
@@ -4951,6 +5682,11 @@
       throw new Error("Load the " + audioRoleLabel + " to render this view.");
     }
 
+    const channelSuffix =
+      Number.isInteger(audioData.sourceChannelIndex) && audioData.sourceChannelIndex >= 0
+        ? " (channel " + (audioData.sourceChannelIndex + 1) + ")"
+        : "";
+
     if (kind === "timeseries") {
       return {
         type: "waveform",
@@ -4961,7 +5697,8 @@
         caption:
           "Raw samples from " +
           audioRoleLabel +
-          " decoded mono mixdown (" +
+          channelSuffix +
+          " decoded waveform (" +
           audioData.sampleRate +
           " Hz, " +
           audioData.duration.toFixed(2) +
@@ -5106,7 +5843,466 @@
   }
 
   function buildTransformRenderSpec(item) {
-    return buildTransformRenderSpecForAudio(item, primaryAudio, derivedCache, "primary clip");
+    return buildTransformRenderSpecForAudio(
+      item,
+      getSingleChannelAnalysisAudio(),
+      derivedCache,
+      "primary clip"
+    );
+  }
+
+  function buildPcaRenderSpec() {
+    const pcaView = ensurePcaView();
+    const goalLabel = state.pca.goal.replace(/_/g, " ");
+    const captionParts = [
+      "PCA projection (" + goalLabel + ") from " + pcaView.sourceDescription,
+      "Explained variance: " + pcaView.explainedSummary + ".",
+      "Rows used: " +
+        pcaView.usedRows +
+        " / " +
+        pcaView.originalRows +
+        ", features used: " +
+        pcaView.usedCols +
+        " / " +
+        pcaView.originalCols +
+        "."
+    ];
+    if (pcaView.note) {
+      captionParts.push(pcaView.note);
+    }
+
+    return {
+      type: "matrix",
+      domainLength: pcaView.matrix.length,
+      durationSeconds: pcaView.durationSeconds,
+      matrix: pcaView.matrix,
+      caption: captionParts.join(" "),
+      pcaView,
+      meta:
+        "goal=" +
+        goalLabel +
+        " | comps=" +
+        pcaView.componentCount +
+        " | " +
+        pcaView.explainedSummary
+      };
+  }
+
+  function parsePcaComponentSelection(rawSelection, maxComponents) {
+    const max = Math.max(1, maxComponents);
+    const all = [];
+    for (let index = 0; index < max; index += 1) {
+      all.push(index);
+    }
+
+    const text = typeof rawSelection === "string" ? rawSelection.trim() : "";
+    if (!text) {
+      return {
+        indices: all,
+        invalidTokens: [],
+        usedAll: true
+      };
+    }
+
+    const picked = new Set();
+    const invalid = [];
+    const tokens = text.split(",");
+
+    tokens.forEach(function (rawToken) {
+      const token = rawToken.trim();
+      if (!token) {
+        return;
+      }
+
+      const rangeMatch = token.match(/^(\d+)\s*-\s*(\d+)$/);
+      if (rangeMatch) {
+        let start = Number(rangeMatch[1]);
+        let end = Number(rangeMatch[2]);
+        if (!Number.isFinite(start) || !Number.isFinite(end)) {
+          invalid.push(token);
+          return;
+        }
+        if (start > end) {
+          const swap = start;
+          start = end;
+          end = swap;
+        }
+        for (let comp = start; comp <= end; comp += 1) {
+          if (comp >= 1 && comp <= max) {
+            picked.add(comp - 1);
+          }
+        }
+        if (end < 1 || start > max) {
+          invalid.push(token);
+        }
+        return;
+      }
+
+      const singleMatch = token.match(/^(\d+)$/);
+      if (singleMatch) {
+        const comp = Number(singleMatch[1]);
+        if (comp >= 1 && comp <= max) {
+          picked.add(comp - 1);
+        } else {
+          invalid.push(token);
+        }
+        return;
+      }
+
+      invalid.push(token);
+    });
+
+    const indices = Array.from(picked).sort(function (a, b) {
+      return a - b;
+    });
+
+    if (indices.length === 0) {
+      return {
+        indices: all,
+        invalidTokens: invalid.length ? invalid : [text],
+        usedAll: true
+      };
+    }
+
+    return {
+      indices,
+      invalidTokens: invalid,
+      usedAll: false
+    };
+  }
+
+  function pcaComponentColor(componentIndex) {
+    const colors = ["#38bdf8", "#f59e0b", "#34d399", "#f472b6", "#a78bfa", "#f87171"];
+    return colors[componentIndex % colors.length];
+  }
+
+  function drawPcaLinePlot(canvas, values, options) {
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+
+    const width = canvas.width;
+    const height = canvas.height;
+    const paddingLeft = 34;
+    const paddingRight = 12;
+    const paddingTop = 10;
+    const paddingBottom = 18;
+    const plotWidth = Math.max(1, width - paddingLeft - paddingRight);
+    const plotHeight = Math.max(1, height - paddingTop - paddingBottom);
+
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = "#0b1220";
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = "rgba(90,140,170,0.15)";
+    ctx.fillRect(paddingLeft, paddingTop, plotWidth, plotHeight);
+
+    if (!values || values.length === 0) {
+      ctx.fillStyle = "rgba(200,200,200,0.85)";
+      ctx.font = "11px sans-serif";
+      ctx.fillText("No data.", paddingLeft + 6, paddingTop + 16);
+      return;
+    }
+
+    let min = Number.POSITIVE_INFINITY;
+    let max = Number.NEGATIVE_INFINITY;
+    for (let index = 0; index < values.length; index += 1) {
+      const value = values[index];
+      if (value < min) {
+        min = value;
+      }
+      if (value > max) {
+        max = value;
+      }
+    }
+    if (!Number.isFinite(min) || !Number.isFinite(max)) {
+      min = -1;
+      max = 1;
+    }
+
+    min = Math.min(min, 0);
+    max = Math.max(max, 0);
+    if (Math.abs(max - min) < 1e-9) {
+      min -= 1;
+      max += 1;
+    }
+
+    const range = max - min;
+    const toY = function (value) {
+      const ratio = (value - min) / range;
+      return paddingTop + (1 - ratio) * plotHeight;
+    };
+
+    const zeroY = toY(0);
+    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(paddingLeft, zeroY);
+    ctx.lineTo(paddingLeft + plotWidth, zeroY);
+    ctx.stroke();
+
+    ctx.strokeStyle = options && options.color ? options.color : "#38bdf8";
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    for (let index = 0; index < values.length; index += 1) {
+      const xRatio = values.length > 1 ? index / (values.length - 1) : 0;
+      const x = paddingLeft + xRatio * plotWidth;
+      const y = toY(values[index]);
+      if (index === 0) {
+        ctx.moveTo(x, y);
+      } else {
+        ctx.lineTo(x, y);
+      }
+    }
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(170,210,235,0.8)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(paddingLeft, paddingTop);
+    ctx.lineTo(paddingLeft, paddingTop + plotHeight);
+    ctx.lineTo(paddingLeft + plotWidth, paddingTop + plotHeight);
+    ctx.stroke();
+
+    ctx.fillStyle = "rgba(220,220,220,0.9)";
+    ctx.font = "10px sans-serif";
+    ctx.fillText(formatMetricNumber(max, 3), 6, paddingTop + 9);
+    ctx.fillText(formatMetricNumber(min, 3), 6, paddingTop + plotHeight);
+  }
+
+  function buildPcaComponentPanel(renderSpec, windowInfo) {
+    const pcaView = renderSpec.pcaView;
+    if (!pcaView || !Array.isArray(pcaView.componentVectors) || pcaView.componentVectors.length === 0) {
+      return null;
+    }
+
+    const parsed = parsePcaComponentSelection(
+      state.pca.componentSelection,
+      pcaView.componentVectors.length
+    );
+
+    const panel = document.createElement("section");
+    panel.className = "pca-component-panel";
+
+    const summary = document.createElement("p");
+    summary.className = "transform-caption";
+    const visibleStart = Math.floor(windowInfo.startIndex) + 1;
+    const visibleEnd = Math.max(visibleStart, Math.floor(windowInfo.endIndex));
+    summary.textContent =
+      "Component selection: " +
+      (parsed.usedAll
+        ? "all (" + pcaView.componentVectors.length + ")"
+        : parsed.indices
+            .map(function (index) {
+              return String(index + 1);
+            })
+            .join(", ")) +
+      " | visible frames " +
+      visibleStart +
+      "-" +
+      visibleEnd +
+      " of " +
+      pcaView.matrix.length +
+      ".";
+    panel.appendChild(summary);
+
+    if (parsed.invalidTokens.length > 0) {
+      const warning = document.createElement("p");
+      warning.className = "transform-caption";
+      warning.textContent =
+        "Ignored invalid component tokens: " + parsed.invalidTokens.join(", ") + ".";
+      panel.appendChild(warning);
+    }
+
+    const grid = document.createElement("div");
+    grid.className = "pca-component-grid";
+
+    const startIndex = clamp(Math.floor(windowInfo.startIndex), 0, Math.max(0, pcaView.matrix.length - 1));
+    const endIndex = clamp(Math.ceil(windowInfo.endIndex), startIndex + 1, pcaView.matrix.length);
+
+    parsed.indices.forEach(function (componentIndex) {
+      const card = document.createElement("article");
+      card.className = "pca-component-card";
+
+      const title = document.createElement("h4");
+      title.className = "pca-component-title";
+      title.textContent =
+        "PC" +
+        (componentIndex + 1) +
+        " | explained " +
+        formatMetricPercent(pcaView.explainedRatios[componentIndex] || 0);
+      card.appendChild(title);
+
+      const scoreLabel = document.createElement("div");
+      scoreLabel.className = "pca-component-label";
+      scoreLabel.textContent = "PC score in visible zoom area";
+      card.appendChild(scoreLabel);
+
+      const scoreValues = new Float32Array(Math.max(1, endIndex - startIndex));
+      for (let rowIndex = startIndex; rowIndex < endIndex; rowIndex += 1) {
+        const projectedRow = pcaView.matrix[rowIndex];
+        scoreValues[rowIndex - startIndex] =
+          projectedRow && componentIndex < projectedRow.length ? projectedRow[componentIndex] : 0;
+      }
+      const scoreCanvas = document.createElement("canvas");
+      scoreCanvas.className = "pca-component-plot";
+      scoreCanvas.width = pickCanvasWidth(1);
+      scoreCanvas.height = 120;
+      drawPcaLinePlot(scoreCanvas, scoreValues, { color: pcaComponentColor(componentIndex) });
+      card.appendChild(scoreCanvas);
+
+      const melLabel = document.createElement("div");
+      melLabel.className = "pca-component-label";
+      melLabel.textContent = "Loading across " + (pcaView.melAxisLabel || "mel bins");
+      card.appendChild(melLabel);
+
+      const melValues =
+        pcaView.componentMelLoadings && pcaView.componentMelLoadings[componentIndex]
+          ? pcaView.componentMelLoadings[componentIndex]
+          : pcaView.componentVectors[componentIndex];
+      const melCanvas = document.createElement("canvas");
+      melCanvas.className = "pca-component-plot";
+      melCanvas.width = pickCanvasWidth(1);
+      melCanvas.height = 120;
+      drawPcaLinePlot(melCanvas, melValues, { color: pcaComponentColor(componentIndex) });
+      card.appendChild(melCanvas);
+
+      const magnitudeLabel = document.createElement("div");
+      magnitudeLabel.className = "pca-component-label";
+      magnitudeLabel.textContent =
+        "Loading across " + (pcaView.magnitudeAxisLabel || "magnitude spectrum bins");
+      card.appendChild(magnitudeLabel);
+
+      const magnitudeValues =
+        pcaView.componentMagnitudeLoadings && pcaView.componentMagnitudeLoadings[componentIndex]
+          ? pcaView.componentMagnitudeLoadings[componentIndex]
+          : pcaView.componentVectors[componentIndex];
+      const magnitudeCanvas = document.createElement("canvas");
+      magnitudeCanvas.className = "pca-component-plot";
+      magnitudeCanvas.width = pickCanvasWidth(1);
+      magnitudeCanvas.height = 120;
+      drawPcaLinePlot(magnitudeCanvas, magnitudeValues, { color: pcaComponentColor(componentIndex) });
+      card.appendChild(magnitudeCanvas);
+
+      const timeVectorLabel = document.createElement("div");
+      timeVectorLabel.className = "pca-component-label";
+      timeVectorLabel.textContent =
+        "PC vector in time domain (" + (pcaView.timeAxisLabel || "sample") + ")";
+      card.appendChild(timeVectorLabel);
+
+      const timeVectorValues =
+        pcaView.componentTimeVectors && pcaView.componentTimeVectors[componentIndex]
+          ? pcaView.componentTimeVectors[componentIndex]
+          : pcaView.componentVectors[componentIndex];
+      const timeVectorCanvas = document.createElement("canvas");
+      timeVectorCanvas.className = "pca-component-plot";
+      timeVectorCanvas.width = pickCanvasWidth(1);
+      timeVectorCanvas.height = 120;
+      drawPcaLinePlot(timeVectorCanvas, timeVectorValues, { color: pcaComponentColor(componentIndex) });
+      card.appendChild(timeVectorCanvas);
+
+      grid.appendChild(card);
+    });
+
+    panel.appendChild(grid);
+    return panel;
+  }
+
+  function renderPcaFeatureCard() {
+    if (!state.pca.enabled) {
+      return;
+    }
+
+    const item = { id: getPcaVirtualViewId(), kind: "pca_feature" };
+    const card = document.createElement("article");
+    card.className = "transform-card" + (selectedViewId === item.id ? " is-selected" : "");
+
+    const header = document.createElement("header");
+    header.className = "transform-card-header";
+
+    const title = document.createElement("div");
+    title.className = "transform-card-title";
+    title.textContent = "PCA Feature View";
+
+    const meta = document.createElement("div");
+    meta.className = "transform-card-meta";
+    meta.textContent = "Awaiting PCA data";
+
+    header.appendChild(title);
+    header.appendChild(meta);
+
+    const body = document.createElement("div");
+    body.className = "transform-card-body";
+
+    try {
+      const renderSpec = buildPcaRenderSpec();
+      meta.textContent = renderSpec.meta;
+
+      const toolbar = buildTransformToolbar(item, renderSpec);
+      body.appendChild(toolbar);
+
+      const grid = document.createElement("div");
+      grid.className = "transform-comparison-grid mode-none";
+
+      const panelWrap = document.createElement("section");
+      panelWrap.className = "comparison-panel";
+
+      const viewport = document.createElement("div");
+      viewport.className = "transform-viewport";
+
+      const canvas = document.createElement("canvas");
+      canvas.className = "transform-canvas";
+      canvas.width = pickCanvasWidth(1);
+      canvas.height = MATRIX_CANVAS_HEIGHT;
+
+      const windowInfo = computeViewWindow(renderSpec.domainLength, item.id);
+      drawHeatmap(canvas, renderSpec.matrix, windowInfo.startIndex, windowInfo.endIndex);
+      drawActivationOverlay(canvas, renderSpec, windowInfo);
+      attachCanvasInteractions(canvas, item, renderSpec);
+
+      const viewportPlayhead = document.createElement("div");
+      viewportPlayhead.className = "transform-playhead";
+
+      viewport.appendChild(canvas);
+      viewport.appendChild(viewportPlayhead);
+      panelWrap.appendChild(viewport);
+      grid.appendChild(panelWrap);
+      body.appendChild(grid);
+
+      const scrollbar = buildTransformScrollbar(item, renderSpec);
+      body.appendChild(scrollbar.element);
+
+      if (shouldShowSpectralBar(item.id)) {
+        const spectralBar = buildSpectralBar(renderSpec, windowInfo);
+        body.appendChild(spectralBar);
+      }
+
+      const pcaComponentPanel = buildPcaComponentPanel(renderSpec, windowInfo);
+      if (pcaComponentPanel) {
+        body.appendChild(pcaComponentPanel);
+      }
+
+      playheadElementsByViewId.set(item.id, {
+        viewportPlayheads: [viewportPlayhead],
+        scrollbarPlayhead: scrollbar.playhead,
+        domainLength: renderSpec.domainLength,
+        durationSeconds: renderSpec.durationSeconds
+      });
+
+      const caption = document.createElement("p");
+      caption.className = "transform-caption";
+      caption.textContent = renderSpec.caption;
+      body.appendChild(caption);
+    } catch (error) {
+      const empty = document.createElement("div");
+      empty.className = "transform-empty";
+      empty.textContent = toErrorText(error);
+      body.appendChild(empty);
+    }
+
+    card.appendChild(header);
+    card.appendChild(body);
+    renderStackContainer.appendChild(card);
   }
 
   function pickCanvasWidth(panelCount) {
@@ -6022,6 +7218,21 @@
     const panel = document.createElement("div");
     panel.className = "timeseries-features";
 
+    if (
+      state.multichannel.enabled &&
+      !state.multichannel.splitViewsByChannel &&
+      primaryAudio &&
+      getAudioChannelCount(primaryAudio) > 1
+    ) {
+      const note = document.createElement("div");
+      note.className = "timeseries-feature-note";
+      note.textContent =
+        "Single-channel feature cards are computed on " +
+        getSingleChannelAnalysisLabel() +
+        ".";
+      panel.appendChild(note);
+    }
+
     if (state.features.power) {
       let sumSquares = 0;
       let peakAbs = 0;
@@ -6888,7 +8099,7 @@
     playheadElementsByViewId.clear();
     renderStackContainer.innerHTML = "";
 
-    if (state.stack.length === 0) {
+    if (state.stack.length === 0 && !state.pca.enabled) {
       const empty = document.createElement("div");
       empty.className = "transform-empty";
       empty.textContent = "No transform views selected. Add one with \"Add View\".";
@@ -6925,9 +8136,18 @@
       body.className = "transform-card-body";
 
       try {
-        const primaryRenderSpec = buildTransformRenderSpec(item);
         const activeComparisonMode =
           state.comparison.mode !== "none" && comparisonAudioData ? state.comparison.mode : "none";
+        const splitByChannel = shouldRenderSplitChannels(activeComparisonMode);
+        const splitChannelCount = splitByChannel ? getAudioChannelCount(primaryAudio) : 1;
+        const primaryRenderSpec = splitByChannel
+          ? buildTransformRenderSpecForAudio(
+              item,
+              getAudioDataForChannel(primaryAudio, 0),
+              derivedCache,
+              "primary clip"
+            )
+          : buildTransformRenderSpec(item);
         const offsetSeconds = sanitizeFloat(state.comparison.offsetSeconds, 0, -30, 30);
         const secondaryRenderSpec =
           activeComparisonMode === "none"
@@ -6939,8 +8159,22 @@
                 "second clip"
               );
 
-        const panelDescriptors =
-          activeComparisonMode === "none"
+        const panelDescriptors = splitByChannel
+          ? Array.from({ length: splitChannelCount }, function (_, channelIndex) {
+              const channelAudio = getAudioDataForChannel(primaryAudio, channelIndex);
+              return {
+                role: "primary",
+                label: "Channel " + (channelIndex + 1),
+                primaryRenderSpec: buildTransformRenderSpecForAudio(
+                  item,
+                  channelAudio,
+                  derivedCache,
+                  "primary clip"
+                ),
+                secondaryRenderSpec: null
+              };
+            })
+          : activeComparisonMode === "none"
             ? [{ role: "primary", label: "Primary" }]
             : activeComparisonMode === "overlay"
               ? [{ role: "overlay", label: "Primary + Second Overlay" }]
@@ -6959,24 +8193,29 @@
         body.appendChild(toolbar);
 
         const grid = document.createElement("div");
-        grid.className = "transform-comparison-grid mode-" + activeComparisonMode;
-        const panelWidthDivisor = getCanvasWidthPanelDivisor(
-          activeComparisonMode,
-          panelDescriptors.length
-        );
+        const gridMode = splitByChannel ? "stacked" : activeComparisonMode;
+        grid.className = "transform-comparison-grid mode-" + gridMode;
+        const panelWidthDivisor = getCanvasWidthPanelDivisor(gridMode, panelDescriptors.length);
 
-        const windowInfo = computeViewWindow(primaryRenderSpec.domainLength, item.id);
+        let firstWindowInfo = null;
         const viewportPlayheads = [];
 
         panelDescriptors.forEach(function (panel) {
           const panelWrap = document.createElement("section");
           panelWrap.className = "comparison-panel";
 
-          if (panelDescriptors.length > 1) {
+          if (panelDescriptors.length > 1 || splitByChannel) {
             const panelLabel = document.createElement("p");
             panelLabel.className = "comparison-panel-label";
             panelLabel.textContent = panel.label;
             panelWrap.appendChild(panelLabel);
+          }
+
+          const panelPrimaryRenderSpec = panel.primaryRenderSpec || primaryRenderSpec;
+          const panelSecondaryRenderSpec = panel.secondaryRenderSpec || secondaryRenderSpec;
+          const panelWindowInfo = computeViewWindow(panelPrimaryRenderSpec.domainLength, item.id);
+          if (!firstWindowInfo) {
+            firstWindowInfo = panelWindowInfo;
           }
 
           const viewport = document.createElement("div");
@@ -6986,22 +8225,24 @@
           canvas.className = "transform-canvas";
           canvas.width = pickCanvasWidth(panelWidthDivisor);
           canvas.height =
-            primaryRenderSpec.type === "waveform" ? WAVEFORM_CANVAS_HEIGHT : MATRIX_CANVAS_HEIGHT;
+            panelPrimaryRenderSpec.type === "waveform"
+              ? WAVEFORM_CANVAS_HEIGHT
+              : MATRIX_CANVAS_HEIGHT;
 
           drawPanelCanvasForComparisonRole(
             panel.role,
             canvas,
-            primaryRenderSpec,
-            secondaryRenderSpec,
-            windowInfo,
+            panelPrimaryRenderSpec,
+            panelSecondaryRenderSpec,
+            panelWindowInfo,
             offsetSeconds
           );
 
           if (panel.role !== "secondary") {
-            drawActivationOverlay(canvas, primaryRenderSpec, windowInfo);
+            drawActivationOverlay(canvas, panelPrimaryRenderSpec, panelWindowInfo);
           }
 
-          attachCanvasInteractions(canvas, item, primaryRenderSpec);
+          attachCanvasInteractions(canvas, item, panelPrimaryRenderSpec);
 
           const viewportPlayhead = document.createElement("div");
           viewportPlayhead.className = "transform-playhead";
@@ -7010,15 +8251,39 @@
           viewport.appendChild(canvas);
           viewport.appendChild(viewportPlayhead);
           panelWrap.appendChild(viewport);
+
+          if (splitByChannel && panelPrimaryRenderSpec.type === "waveform") {
+            const waveformBar = buildTimeseriesBar(panelPrimaryRenderSpec, panelWindowInfo);
+            panelWrap.appendChild(waveformBar);
+
+            const timeseriesStats = buildTimeseriesStatsPanel(panelPrimaryRenderSpec, panelWindowInfo);
+            panelWrap.appendChild(timeseriesStats);
+
+            const featurePanel = buildTimeseriesFeaturePanel(panelPrimaryRenderSpec, panelWindowInfo);
+            if (featurePanel) {
+              panelWrap.appendChild(featurePanel);
+            }
+          }
+
+          if (
+            splitByChannel &&
+            panelPrimaryRenderSpec.type === "matrix" &&
+            shouldShowSpectralBar(item.id)
+          ) {
+            const spectralBar = buildSpectralBar(panelPrimaryRenderSpec, panelWindowInfo);
+            panelWrap.appendChild(spectralBar);
+          }
+
           grid.appendChild(panelWrap);
         });
 
         body.appendChild(grid);
 
+        const windowInfo = firstWindowInfo || computeViewWindow(primaryRenderSpec.domainLength, item.id);
         const scrollbar = buildTransformScrollbar(item, primaryRenderSpec);
         body.appendChild(scrollbar.element);
 
-        if (primaryRenderSpec.type === "waveform") {
+        if (!splitByChannel && primaryRenderSpec.type === "waveform") {
           const waveformBar = buildTimeseriesBar(primaryRenderSpec, windowInfo);
           body.appendChild(waveformBar);
 
@@ -7031,7 +8296,7 @@
           }
         }
 
-        if (primaryRenderSpec.type === "matrix" && shouldShowSpectralBar(item.id)) {
+        if (!splitByChannel && primaryRenderSpec.type === "matrix" && shouldShowSpectralBar(item.id)) {
           const spectralBar = buildSpectralBar(primaryRenderSpec, windowInfo);
           body.appendChild(spectralBar);
         }
@@ -7045,7 +8310,13 @@
 
         const caption = document.createElement("p");
         caption.className = "transform-caption";
-        if (activeComparisonMode === "none") {
+        if (splitByChannel) {
+          caption.textContent =
+            "Multichannel split view (" +
+            splitChannelCount +
+            " channels). " +
+            primaryRenderSpec.caption;
+        } else if (activeComparisonMode === "none") {
           caption.textContent = primaryRenderSpec.caption;
         } else {
           caption.textContent =
@@ -7068,6 +8339,8 @@
       card.appendChild(body);
       renderStackContainer.appendChild(card);
     }
+
+    renderPcaFeatureCard();
 
     updateAnimatedPlayheads();
     renderMetricsReport();
@@ -7423,27 +8696,54 @@
 
   pcaEnabled.addEventListener("change", function () {
     state.pca.enabled = pcaEnabled.checked;
+    renderTransformStack();
     postState();
   });
 
   pcaGoal.addEventListener("change", function () {
     state.pca.goal = pcaGoal.value;
     updatePcaGuidance();
+    renderTransformStack();
     postState();
   });
 
   pcaClasswise.addEventListener("change", function () {
     state.pca.classwise = pcaClasswise.checked;
+    renderTransformStack();
+    postState();
+  });
+
+  pcaComponents.addEventListener("change", function () {
+    state.pca.componentSelection = sanitizeStringValue(pcaComponents.value, 128);
+    pcaComponents.value = state.pca.componentSelection || "";
+    renderTransformStack();
     postState();
   });
 
   multichannelEnabled.addEventListener("change", function () {
     state.multichannel.enabled = multichannelEnabled.checked;
+    updateMultichannelControlsFromAudio();
+    renderTransformStack();
     postState();
   });
 
   multichannelSplit.addEventListener("change", function () {
     state.multichannel.splitViewsByChannel = multichannelSplit.checked;
+    updateMultichannelControlsFromAudio();
+    renderTransformStack();
+    postState();
+  });
+
+  multichannelAnalysisChannel.addEventListener("change", function () {
+    const channelCount = primaryAudio ? getAudioChannelCount(primaryAudio) : 1;
+    state.multichannel.analysisChannelIndex = sanitizeInt(
+      multichannelAnalysisChannel.value,
+      0,
+      -1,
+      Math.max(-1, channelCount - 1)
+    );
+    updateMultichannelControlsFromAudio();
+    renderTransformStack();
     postState();
   });
 

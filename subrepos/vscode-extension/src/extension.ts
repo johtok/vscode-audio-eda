@@ -416,6 +416,7 @@ function sanitizeWorkbenchStatePayload(rawState: unknown): unknown | undefined {
       | "doa_beamforming"
       | "enhancement";
     sanitized.pca.classwise = sanitizeBoolean(pca.classwise, sanitized.pca.classwise);
+    sanitized.pca.componentSelection = sanitizeNullableString(pca.componentSelection, 128);
   }
 
   const multichannel = asRecord(record.multichannel);
@@ -427,6 +428,12 @@ function sanitizeWorkbenchStatePayload(rawState: unknown): unknown | undefined {
     sanitized.multichannel.splitViewsByChannel = sanitizeBoolean(
       multichannel.splitViewsByChannel,
       sanitized.multichannel.splitViewsByChannel
+    );
+    sanitized.multichannel.analysisChannelIndex = sanitizeInteger(
+      multichannel.analysisChannelIndex,
+      sanitized.multichannel.analysisChannelIndex,
+      -1,
+      63
     );
   }
 
