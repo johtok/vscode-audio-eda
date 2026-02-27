@@ -1,0 +1,11 @@
+source=finger_snaps_mono16k.wav
+sample_rate=16000
+frame_len_samples=320
+hop_samples=160
+threshold=0.01543851
+frames=368
+active_frames=37
+active_ratio=0.100543
+intervals=4
+flag_csv=finger_snaps_energy_flag.csv
+timestamped_csv=finger_snaps_energy_timestamped.csv
