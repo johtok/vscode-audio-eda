@@ -466,6 +466,69 @@ input.is-locked {
   gap: 8px;
 }
 
+.metrics-report-panel {
+  margin-top: 12px;
+  border: 1px solid color-mix(in srgb, var(--vscode-panel-border) 80%, #3b99bb 20%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--vscode-editor-background) 90%, #113243 10%);
+  padding: 10px;
+}
+
+.metrics-report-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.metrics-content {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.metrics-group {
+  border: 1px solid color-mix(in srgb, var(--vscode-panel-border) 78%, #2f8aab 22%);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--vscode-editor-background) 91%, #102b3a 9%);
+  padding: 8px;
+}
+
+.metrics-group h3 {
+  margin: 0 0 8px;
+  font-size: 0.82rem;
+}
+
+.metrics-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.77rem;
+}
+
+.metrics-table td {
+  padding: 2px 0;
+  vertical-align: top;
+}
+
+.metrics-table td:first-child {
+  color: var(--vscode-descriptionForeground);
+  padding-right: 8px;
+}
+
+.metrics-table td:last-child {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.metrics-histogram {
+  margin-top: 10px;
+  width: 100%;
+  height: auto;
+  border: 1px solid color-mix(in srgb, var(--vscode-panel-border) 78%, #2f8aab 22%);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--vscode-editor-background) 92%, #112635 8%);
+  display: block;
+}
+
 @media (max-width: 980px) {
   .layout {
     grid-template-columns: 1fr;

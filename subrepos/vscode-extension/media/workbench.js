@@ -48,6 +48,13 @@
   const MAX_FILTERBANK_CSV_INPUT_BYTES = 2 * 1024 * 1024;
   const MAX_FILTERBANK_ROWS = 2048;
   const MAX_FILTERBANK_COLUMNS = 8192;
+  const METRICS_HISTOGRAM_BINS = 64;
+  const METRICS_DISTRIBUTION_SAMPLE_LIMIT = 200000;
+  const METRICS_FRAME_SIZE_SECONDS = 0.03;
+  const METRICS_HOP_SIZE_SECONDS = 0.01;
+  const METRICS_SPEECH_SILENCE_DB_OFFSET = 35;
+  const METRICS_SPEECH_ACTIVITY_DB_OFFSET = 20;
+  const METRICS_EXPORT_MAX_ROWS = 200000;
   const DEFAULT_TRANSFORM_PARAMS = {
     stft: {
       mode: "magnitude",
@@ -164,6 +171,11 @@
   const metricStatistical = byId("metric-statistical");
   const metricDistributional = byId("metric-distributional");
   const metricClasswise = byId("metric-classwise");
+  const metricsStatus = byId("metrics-status");
+  const metricsContent = byId("metrics-content");
+  const metricsHistogramCanvas = byId("metrics-histogram");
+  const metricsExportJson = byId("metrics-export-json");
+  const metricsExportCsv = byId("metrics-export-csv");
 
   const featurePower = byId("feature-power");
   const featureAutocorrelation = byId("feature-autocorrelation");
@@ -188,6 +200,8 @@
   let overlayStatusMessage = "";
   let derivedCache = createEmptyDerivedCache();
   let comparisonDerivedCache = createEmptyDerivedCache();
+  let metricsCache = { cacheKey: "", report: null };
+  let metricsRenderSignature = "";
   let resizeTick = 0;
   let selectedViewId = null;
   const expandedRowSettingsIds = new Set();
@@ -236,11 +250,28 @@
       return null;
     }
 
-    if (
-      sanitized.indexOf("vscode-webview-resource:") === 0 ||
-      sanitized.indexOf("vscode-webview://") === 0
-    ) {
+    const lower = sanitized.toLowerCase();
+    if (lower.indexOf("vscode-webview-resource:") === 0) {
       return sanitized;
+    }
+    if (lower.indexOf("vscode-webview://") === 0) {
+      return sanitized;
+    }
+    if (lower.indexOf("vscode-resource:") === 0) {
+      return sanitized;
+    }
+
+    // VS Code remote/web environments can map local resources to trusted CDN URLs.
+    if (lower.indexOf("https://") === 0) {
+      let parsed;
+      try {
+        parsed = new URL(sanitized);
+      } catch {
+        parsed = null;
+      }
+      if (parsed && /(^|\.)vscode-cdn\.net$/i.test(parsed.hostname)) {
+        return sanitized;
+      }
     }
 
     return null;
@@ -677,6 +708,8 @@
   function clearDerivedCache() {
     derivedCache = createEmptyDerivedCache();
     comparisonDerivedCache = createEmptyDerivedCache();
+    metricsCache = { cacheKey: "", report: null };
+    metricsRenderSignature = "";
   }
 
   function sanitizeInt(raw, fallback, min, max) {
@@ -1193,6 +1226,875 @@
     }
     const precision = value >= 100 ? 0 : value >= 10 ? 1 : 2;
     return value.toFixed(precision) + " " + units[unitIndex];
+  }
+
+  function metricsAudioKey(audioData) {
+    if (!audioData) {
+      return "";
+    }
+    return (
+      (audioData.audioKey || audioData.fileName || "audio") +
+      "::" +
+      audioData.sampleRate +
+      "::" +
+      audioData.samples.length +
+      "::" +
+      audioData.channelCount
+    );
+  }
+
+  function sampleForDistribution(values, maxCount) {
+    if (!values || values.length === 0) {
+      return [];
+    }
+    if (values.length <= maxCount) {
+      return Array.from(values);
+    }
+
+    const output = new Array(maxCount);
+    const stride = values.length / maxCount;
+    let cursor = 0;
+    for (let index = 0; index < maxCount; index += 1) {
+      output[index] = values[Math.floor(cursor)];
+      cursor += stride;
+    }
+    return output;
+  }
+
+  function quantileSorted(sortedValues, quantile) {
+    if (!sortedValues || sortedValues.length === 0) {
+      return 0;
+    }
+    const q = clamp(quantile, 0, 1);
+    const scaledIndex = q * (sortedValues.length - 1);
+    const low = Math.floor(scaledIndex);
+    const high = Math.min(sortedValues.length - 1, low + 1);
+    const weight = scaledIndex - low;
+    return sortedValues[low] * (1 - weight) + sortedValues[high] * weight;
+  }
+
+  function summarizeFrames(samples, sampleRate) {
+    const frameSize = Math.max(128, Math.round(sampleRate * METRICS_FRAME_SIZE_SECONDS));
+    const hopSize = Math.max(64, Math.round(sampleRate * METRICS_HOP_SIZE_SECONDS));
+    const totalFrames = Math.max(
+      1,
+      Math.floor((Math.max(samples.length, frameSize) - frameSize) / hopSize) + 1
+    );
+    const frameStride = Math.max(1, Math.floor(totalFrames / 6000));
+    const energyByFrame = [];
+    const zcrByFrame = [];
+
+    for (let frame = 0; frame < totalFrames; frame += frameStride) {
+      const offset = frame * hopSize;
+      let sumSquares = 0;
+      let zeroCrossings = 0;
+      let previousSign = 0;
+
+      for (let index = 0; index < frameSize; index += 1) {
+        const sampleIndex = offset + index;
+        const value = sampleIndex < samples.length ? samples[sampleIndex] : 0;
+        sumSquares += value * value;
+
+        const sign = value > 0 ? 1 : value < 0 ? -1 : 0;
+        if (previousSign !== 0 && sign !== 0 && sign !== previousSign) {
+          zeroCrossings += 1;
+        }
+        if (sign !== 0) {
+          previousSign = sign;
+        }
+      }
+
+      energyByFrame.push(sumSquares / frameSize);
+      zcrByFrame.push(zeroCrossings / Math.max(1, frameSize - 1));
+    }
+
+    return {
+      frameSize,
+      hopSize,
+      frameCount: energyByFrame.length,
+      energyByFrame,
+      zcrByFrame
+    };
+  }
+
+  function summarizeAutocorrelation(samples, sampleRate) {
+    const maxScan = Math.min(samples.length, 16384);
+    if (maxScan < 4 || sampleRate <= 0) {
+      return {
+        bestLag: 0,
+        bestCorrelation: 0,
+        estimatedF0Hz: 0
+      };
+    }
+
+    let zeroLag = 0;
+    for (let index = 0; index < maxScan; index += 1) {
+      const value = samples[index];
+      zeroLag += value * value;
+    }
+
+    if (zeroLag <= 1e-12) {
+      return {
+        bestLag: 0,
+        bestCorrelation: 0,
+        estimatedF0Hz: 0
+      };
+    }
+
+    const maxLag = Math.min(maxScan - 1, Math.max(16, Math.floor(sampleRate / 40)));
+    const minLag = Math.min(maxLag, Math.max(1, Math.floor(sampleRate / 500)));
+    let bestLag = 0;
+    let bestCorrelation = Number.NEGATIVE_INFINITY;
+
+    for (let lag = minLag; lag <= maxLag; lag += 1) {
+      let sum = 0;
+      for (let index = 0; index + lag < maxScan; index += 1) {
+        sum += samples[index] * samples[index + lag];
+      }
+      const normalized = sum / zeroLag;
+      if (normalized > bestCorrelation) {
+        bestCorrelation = normalized;
+        bestLag = lag;
+      }
+    }
+
+    const estimatedF0Hz =
+      bestLag > 0 && Number.isFinite(bestCorrelation) && bestCorrelation > 0
+        ? sampleRate / bestLag
+        : 0;
+
+    return {
+      bestLag,
+      bestCorrelation: Number.isFinite(bestCorrelation) ? bestCorrelation : 0,
+      estimatedF0Hz
+    };
+  }
+
+  function summarizeHistogram(values, bins, minValue, maxValue) {
+    const safeBins = Math.max(4, sanitizeInt(bins, METRICS_HISTOGRAM_BINS, 4, 512));
+    const counts = new Array(safeBins).fill(0);
+    if (!values || values.length === 0) {
+      return {
+        min: minValue,
+        max: maxValue,
+        binWidth: (maxValue - minValue) / safeBins,
+        counts,
+        total: 0,
+        entropyBits: 0
+      };
+    }
+
+    const range = Math.max(1e-9, maxValue - minValue);
+    for (let index = 0; index < values.length; index += 1) {
+      const normalized = (values[index] - minValue) / range;
+      const bin = clamp(Math.floor(normalized * safeBins), 0, safeBins - 1);
+      counts[bin] += 1;
+    }
+
+    let entropyBits = 0;
+    for (let index = 0; index < counts.length; index += 1) {
+      const probability = counts[index] / values.length;
+      if (probability > 0) {
+        entropyBits -= probability * Math.log2(probability);
+      }
+    }
+
+    return {
+      min: minValue,
+      max: maxValue,
+      binWidth: range / safeBins,
+      counts,
+      total: values.length,
+      entropyBits
+    };
+  }
+
+  function computeMetricsReport(audioData) {
+    if (!audioData || !audioData.samples || audioData.samples.length === 0) {
+      return null;
+    }
+
+    const samples = audioData.samples;
+    const sampleRate = audioData.sampleRate || 0;
+    const sampleCount = samples.length;
+    const channelCount = Math.max(1, audioData.channelCount || 1);
+    const durationSeconds = sampleRate > 0 ? sampleCount / sampleRate : 0;
+
+    let min = Number.POSITIVE_INFINITY;
+    let max = Number.NEGATIVE_INFINITY;
+    let sum = 0;
+    let sumSquares = 0;
+    let sumAbs = 0;
+    let zeroCrossings = 0;
+    let previousSign = 0;
+    let clippingCount = 0;
+
+    for (let index = 0; index < sampleCount; index += 1) {
+      const value = samples[index];
+      if (value < min) {
+        min = value;
+      }
+      if (value > max) {
+        max = value;
+      }
+      sum += value;
+      sumSquares += value * value;
+      sumAbs += Math.abs(value);
+      if (Math.abs(value) >= 0.999) {
+        clippingCount += 1;
+      }
+
+      const sign = value > 0 ? 1 : value < 0 ? -1 : 0;
+      if (previousSign !== 0 && sign !== 0 && sign !== previousSign) {
+        zeroCrossings += 1;
+      }
+      if (sign !== 0) {
+        previousSign = sign;
+      }
+    }
+
+    const mean = sum / sampleCount;
+    const meanAbs = sumAbs / sampleCount;
+    const variance = Math.max(0, sumSquares / sampleCount - mean * mean);
+    const std = Math.sqrt(variance);
+    const rms = Math.sqrt(sumSquares / sampleCount);
+    const peakAbs = Math.max(Math.abs(min), Math.abs(max));
+    const crestFactor = peakAbs / Math.max(1e-12, rms);
+    const zcr = zeroCrossings / Math.max(1, sampleCount - 1);
+    const clippingRatio = clippingCount / sampleCount;
+    const energy = sumSquares;
+    const meanPowerDb = 10 * Math.log10(sumSquares / sampleCount + 1e-12);
+
+    const distributionSample = sampleForDistribution(samples, METRICS_DISTRIBUTION_SAMPLE_LIMIT);
+    const sortedDistribution = distributionSample.slice().sort(function (a, b) {
+      return a - b;
+    });
+    const median = quantileSorted(sortedDistribution, 0.5);
+    const q25 = quantileSorted(sortedDistribution, 0.25);
+    const q75 = quantileSorted(sortedDistribution, 0.75);
+    const iqr = q75 - q25;
+
+    let moment3 = 0;
+    let moment4 = 0;
+    for (let index = 0; index < distributionSample.length; index += 1) {
+      const centered = distributionSample[index] - mean;
+      const square = centered * centered;
+      moment3 += square * centered;
+      moment4 += square * square;
+    }
+    const sampleDenominator = Math.max(1, distributionSample.length);
+    moment3 /= sampleDenominator;
+    moment4 /= sampleDenominator;
+    const skewness = std > 1e-12 ? moment3 / Math.pow(std, 3) : 0;
+    const kurtosisExcess = std > 1e-12 ? moment4 / Math.pow(std, 4) - 3 : 0;
+
+    const frameSummary = summarizeFrames(samples, sampleRate);
+    const frameEnergyDb = frameSummary.energyByFrame.map(function (value) {
+      return 10 * Math.log10(value + 1e-12);
+    });
+    const sortedFrameEnergyDb = frameEnergyDb.slice().sort(function (a, b) {
+      return a - b;
+    });
+    const maxFrameDb = sortedFrameEnergyDb.length
+      ? sortedFrameEnergyDb[sortedFrameEnergyDb.length - 1]
+      : -120;
+    const silenceThresholdDb = maxFrameDb - METRICS_SPEECH_SILENCE_DB_OFFSET;
+    const activeThresholdDb = maxFrameDb - METRICS_SPEECH_ACTIVITY_DB_OFFSET;
+
+    let silenceFrames = 0;
+    let activeFrames = 0;
+    let voicedFrames = 0;
+    let activeEnergyAccum = 0;
+    let activeEnergyCount = 0;
+    let inactiveEnergyAccum = 0;
+    let inactiveEnergyCount = 0;
+
+    for (let index = 0; index < frameEnergyDb.length; index += 1) {
+      const energyDb = frameEnergyDb[index];
+      const frameZcr = frameSummary.zcrByFrame[index];
+      const isSilent = energyDb < silenceThresholdDb;
+      const isActive = energyDb >= activeThresholdDb;
+      if (isSilent) {
+        silenceFrames += 1;
+      }
+      if (isActive) {
+        activeFrames += 1;
+        activeEnergyAccum += energyDb;
+        activeEnergyCount += 1;
+        if (frameZcr >= 0.02 && frameZcr <= 0.25) {
+          voicedFrames += 1;
+        }
+      } else {
+        inactiveEnergyAccum += energyDb;
+        inactiveEnergyCount += 1;
+      }
+    }
+
+    const frameCount = Math.max(1, frameSummary.frameCount);
+    const speechActivityRatio = activeFrames / frameCount;
+    const silenceRatio = silenceFrames / frameCount;
+    const voicedRatio = voicedFrames / frameCount;
+    const meanFrameEnergyDb = frameEnergyDb.length
+      ? frameEnergyDb.reduce(function (acc, value) {
+          return acc + value;
+        }, 0) / frameEnergyDb.length
+      : -120;
+    const dynamicRangeDb =
+      quantileSorted(sortedFrameEnergyDb, 0.95) - quantileSorted(sortedFrameEnergyDb, 0.05);
+    const speechSnrProxyDb =
+      activeEnergyCount > 0 && inactiveEnergyCount > 0
+        ? activeEnergyAccum / activeEnergyCount - inactiveEnergyAccum / inactiveEnergyCount
+        : 0;
+
+    const histogram = summarizeHistogram(distributionSample, METRICS_HISTOGRAM_BINS, -1, 1);
+    const autocorrelation = summarizeAutocorrelation(samples, sampleRate);
+
+    const frameEnergyMean =
+      frameSummary.energyByFrame.length > 0
+        ? frameSummary.energyByFrame.reduce(function (acc, value) {
+            return acc + value;
+          }, 0) / frameSummary.energyByFrame.length
+        : 0;
+    const sortedFrameEnergy = frameSummary.energyByFrame.slice().sort(function (a, b) {
+      return a - b;
+    });
+    const frameEnergyVariance =
+      frameSummary.energyByFrame.length > 0
+        ? frameSummary.energyByFrame.reduce(function (acc, value) {
+            const centered = value - frameEnergyMean;
+            return acc + centered * centered;
+          }, 0) / frameSummary.energyByFrame.length
+        : 0;
+
+    const shortTimeAuto = summarizeAutocorrelation(Float32Array.from(frameSummary.energyByFrame), 100);
+
+    return {
+      generatedAt: new Date().toISOString(),
+      fileName: audioData.fileName || "audio",
+      sampleCount,
+      audio: {
+        sampleRate,
+        channelCount,
+        durationSeconds,
+        min,
+        max,
+        mean,
+        meanAbs,
+        rms,
+        peakAbs,
+        crestFactor,
+        zcr,
+        clippingRatio,
+        energy,
+        meanPowerDb
+      },
+      speech: {
+        frameSize: frameSummary.frameSize,
+        hopSize: frameSummary.hopSize,
+        frameCount: frameSummary.frameCount,
+        silenceRatio,
+        speechActivityRatio,
+        voicedRatio,
+        meanFrameEnergyDb,
+        dynamicRangeDb,
+        speechSnrProxyDb,
+        heuristic: "Energy + ZCR heuristic (not ASR-grade VAD)."
+      },
+      statistical: {
+        mean,
+        std,
+        variance,
+        min,
+        max,
+        median,
+        q25,
+        q75,
+        iqr,
+        skewness,
+        kurtosisExcess
+      },
+      distributional: {
+        histogram,
+        moments: {
+          m1: mean,
+          m2: variance,
+          m3: moment3,
+          m4: moment4
+        },
+        entropyBits: histogram.entropyBits
+      },
+      features: {
+        power: {
+          meanPower: sumSquares / sampleCount,
+          meanPowerDb
+        },
+        autocorrelation,
+        shortTimePower: {
+          frameMean: frameEnergyMean,
+          frameStd: Math.sqrt(Math.max(0, frameEnergyVariance)),
+          frameP95: quantileSorted(sortedFrameEnergy, 0.95),
+          frameP05: quantileSorted(sortedFrameEnergy, 0.05)
+        },
+        shortTimeAutocorrelation: shortTimeAuto
+      }
+    };
+  }
+
+  function getPrimaryMetricsReport() {
+    if (!primaryAudio || !primaryAudio.samples || primaryAudio.samples.length === 0) {
+      return null;
+    }
+
+    const cacheKey = metricsAudioKey(primaryAudio);
+    if (metricsCache.cacheKey === cacheKey && metricsCache.report) {
+      return metricsCache.report;
+    }
+
+    const report = computeMetricsReport(primaryAudio);
+    metricsCache = { cacheKey, report };
+    return report;
+  }
+
+  function formatMetricNumber(value, decimals) {
+    if (!Number.isFinite(value)) {
+      return "n/a";
+    }
+    const places = Number.isFinite(decimals) ? decimals : 4;
+    const absolute = Math.abs(value);
+    if (absolute >= 100000 || (absolute > 0 && absolute < 1e-4)) {
+      return value.toExponential(3);
+    }
+    if (absolute >= 1000) {
+      return value.toFixed(1);
+    }
+    return value.toFixed(places);
+  }
+
+  function formatMetricPercent(value) {
+    if (!Number.isFinite(value)) {
+      return "n/a";
+    }
+    return (value * 100).toFixed(2) + "%";
+  }
+
+  function createMetricsGroup(title, rows) {
+    const group = document.createElement("section");
+    group.className = "metrics-group";
+
+    const heading = document.createElement("h3");
+    heading.textContent = title;
+    group.appendChild(heading);
+
+    const table = document.createElement("table");
+    table.className = "metrics-table";
+    const body = document.createElement("tbody");
+
+    rows.forEach(function (row) {
+      const tr = document.createElement("tr");
+      const key = document.createElement("td");
+      key.textContent = row[0];
+      const value = document.createElement("td");
+      value.textContent = row[1];
+      tr.appendChild(key);
+      tr.appendChild(value);
+      body.appendChild(tr);
+    });
+
+    table.appendChild(body);
+    group.appendChild(table);
+    return group;
+  }
+
+  function getHistogramCanvasContext(canvas) {
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return null;
+    }
+
+    const cssWidth = Math.max(1, Math.round(canvas.clientWidth || canvas.width || 720));
+    const cssHeight = Math.max(1, Math.round(canvas.clientHeight || 220));
+    const ratio = window.devicePixelRatio || 1;
+    const targetWidth = Math.max(1, Math.round(cssWidth * ratio));
+    const targetHeight = Math.max(1, Math.round(cssHeight * ratio));
+
+    if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+    }
+
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.scale(ratio, ratio);
+    return { context, width: cssWidth, height: cssHeight };
+  }
+
+  function clearMetricsHistogram(message) {
+    const prepared = getHistogramCanvasContext(metricsHistogramCanvas);
+    if (!prepared) {
+      return;
+    }
+    const ctx = prepared.context;
+    ctx.clearRect(0, 0, prepared.width, prepared.height);
+    ctx.fillStyle = "rgba(127,127,127,0.18)";
+    ctx.fillRect(0, 0, prepared.width, prepared.height);
+    if (message) {
+      ctx.fillStyle = "rgba(200,200,200,0.85)";
+      ctx.font = "12px sans-serif";
+      ctx.fillText(message, 14, Math.max(20, Math.floor(prepared.height / 2)));
+    }
+  }
+
+  function drawMetricsHistogram(histogram) {
+    const prepared = getHistogramCanvasContext(metricsHistogramCanvas);
+    if (!prepared) {
+      return;
+    }
+
+    const ctx = prepared.context;
+    const width = prepared.width;
+    const height = prepared.height;
+    ctx.clearRect(0, 0, width, height);
+
+    const paddingLeft = 44;
+    const paddingRight = 12;
+    const paddingTop = 12;
+    const paddingBottom = 28;
+    const plotWidth = Math.max(10, width - paddingLeft - paddingRight);
+    const plotHeight = Math.max(10, height - paddingTop - paddingBottom);
+    const counts = histogram.counts || [];
+    const maxCount = counts.length
+      ? counts.reduce(function (max, value) {
+          return value > max ? value : max;
+        }, 0)
+      : 0;
+
+    ctx.fillStyle = "rgba(90,140,170,0.18)";
+    ctx.fillRect(paddingLeft, paddingTop, plotWidth, plotHeight);
+
+    if (maxCount <= 0 || counts.length === 0) {
+      ctx.fillStyle = "rgba(200,200,200,0.85)";
+      ctx.font = "12px sans-serif";
+      ctx.fillText("No histogram data.", paddingLeft + 8, paddingTop + 20);
+      return;
+    }
+
+    const barWidth = plotWidth / counts.length;
+    for (let index = 0; index < counts.length; index += 1) {
+      const ratio = counts[index] / maxCount;
+      const barHeight = ratio * plotHeight;
+      const x = paddingLeft + index * barWidth;
+      const y = paddingTop + plotHeight - barHeight;
+      ctx.fillStyle = "rgba(56,189,248,0.9)";
+      ctx.fillRect(x, y, Math.max(1, barWidth - 1), barHeight);
+    }
+
+    ctx.strokeStyle = "rgba(170,210,235,0.8)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(paddingLeft, paddingTop);
+    ctx.lineTo(paddingLeft, paddingTop + plotHeight);
+    ctx.lineTo(paddingLeft + plotWidth, paddingTop + plotHeight);
+    ctx.stroke();
+
+    ctx.fillStyle = "rgba(220,220,220,0.9)";
+    ctx.font = "11px sans-serif";
+    ctx.fillText(formatMetricNumber(histogram.min, 2), paddingLeft, height - 8);
+    const maxLabel = formatMetricNumber(histogram.max, 2);
+    const labelWidth = ctx.measureText(maxLabel).width;
+    ctx.fillText(maxLabel, paddingLeft + plotWidth - labelWidth, height - 8);
+    ctx.fillText("0", 24, paddingTop + plotHeight + 4);
+    ctx.fillText(formatMetricNumber(maxCount, 0), 8, paddingTop + 8);
+  }
+
+  function metricsExportBaseName() {
+    const candidate = primaryAudio && primaryAudio.fileName ? primaryAudio.fileName : "audio";
+    const withoutExtension = candidate.replace(/\.[^./\\]+$/, "");
+    const normalized = withoutExtension.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "");
+    return normalized || "audio";
+  }
+
+  function escapeCsvField(value) {
+    const text = String(value);
+    if (text.indexOf(",") === -1 && text.indexOf("\"") === -1 && text.indexOf("\n") === -1) {
+      return text;
+    }
+    return "\"" + text.replace(/"/g, "\"\"") + "\"";
+  }
+
+  function buildMetricsExportModel(report) {
+    const output = {
+      generatedAt: report.generatedAt,
+      fileName: report.fileName,
+      sampleCount: report.sampleCount,
+      sections: {}
+    };
+
+    if (state.metrics.audio) {
+      output.sections.audio = report.audio;
+    }
+    if (state.metrics.speech) {
+      output.sections.speech = report.speech;
+    }
+    if (state.metrics.statistical) {
+      output.sections.statistical = report.statistical;
+    }
+    if (state.metrics.distributional) {
+      output.sections.distributional = report.distributional;
+    }
+    if (state.metrics.classwise) {
+      output.sections.classwise = {
+        note: "Classwise metrics require label metadata (Phase 8)."
+      };
+    }
+
+    const selectedFeatures = {};
+    if (state.features.power) {
+      selectedFeatures.power = report.features.power;
+    }
+    if (state.features.autocorrelation) {
+      selectedFeatures.autocorrelation = report.features.autocorrelation;
+    }
+    if (state.features.shortTimePower) {
+      selectedFeatures.shortTimePower = report.features.shortTimePower;
+    }
+    if (state.features.shortTimeAutocorrelation) {
+      selectedFeatures.shortTimeAutocorrelation = report.features.shortTimeAutocorrelation;
+    }
+    if (Object.keys(selectedFeatures).length > 0) {
+      output.sections.features = selectedFeatures;
+    }
+
+    return output;
+  }
+
+  function flattenExportSection(lines, sectionName, value, prefix) {
+    const labelPrefix = prefix ? prefix + "." : "";
+    if (value === null || value === undefined) {
+      lines.push([sectionName, labelPrefix.replace(/\.$/, ""), ""]);
+      return;
+    }
+    if (typeof value !== "object") {
+      lines.push([sectionName, labelPrefix.replace(/\.$/, ""), String(value)]);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (let index = 0; index < value.length && lines.length < METRICS_EXPORT_MAX_ROWS; index += 1) {
+        flattenExportSection(lines, sectionName, value[index], labelPrefix + index);
+      }
+      return;
+    }
+
+    const keys = Object.keys(value);
+    for (let index = 0; index < keys.length && lines.length < METRICS_EXPORT_MAX_ROWS; index += 1) {
+      const key = keys[index];
+      flattenExportSection(lines, sectionName, value[key], labelPrefix + key);
+    }
+  }
+
+  function buildMetricsCsv(exportModel) {
+    const rows = [["section", "metric", "value"]];
+    const sections = exportModel.sections || {};
+    const sectionNames = Object.keys(sections);
+    for (let index = 0; index < sectionNames.length && rows.length < METRICS_EXPORT_MAX_ROWS; index += 1) {
+      const sectionName = sectionNames[index];
+      flattenExportSection(rows, sectionName, sections[sectionName], "");
+    }
+    return rows
+      .map(function (row) {
+        return row.map(escapeCsvField).join(",");
+      })
+      .join("\n");
+  }
+
+  function triggerTextDownload(fileName, mimeType, content) {
+    const blob = new Blob([content], { type: mimeType + ";charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.style.display = "none";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(function () {
+      URL.revokeObjectURL(url);
+    }, 1000);
+  }
+
+  function renderMetricsReport() {
+    if (!metricsContent || !metricsStatus || !metricsHistogramCanvas) {
+      return;
+    }
+    const report = getPrimaryMetricsReport();
+    const widthSignature = Math.round(metricsHistogramCanvas.clientWidth || 0);
+    const signature =
+      (report ? metricsAudioKey(primaryAudio) : "none") +
+      "|" +
+      widthSignature +
+      "|" +
+      [state.metrics.audio, state.metrics.speech, state.metrics.statistical, state.metrics.distributional, state.metrics.classwise].join(",") +
+      "|" +
+      [
+        state.features.power,
+        state.features.autocorrelation,
+        state.features.shortTimePower,
+        state.features.shortTimeAutocorrelation
+      ].join(",");
+
+    if (signature === metricsRenderSignature) {
+      return;
+    }
+    metricsRenderSignature = signature;
+    metricsContent.innerHTML = "";
+
+    if (!report) {
+      metricsExportJson.disabled = true;
+      metricsExportCsv.disabled = true;
+      metricsStatus.textContent = "Load a primary audio clip to compute metrics.";
+      clearMetricsHistogram("Load audio to show histogram.");
+      return;
+    }
+
+    metricsExportJson.disabled = false;
+    metricsExportCsv.disabled = false;
+    metricsStatus.textContent =
+      "Computed on " +
+      report.sampleCount +
+      " samples (" +
+      formatMetricNumber(report.audio.durationSeconds, 3) +
+      " s).";
+
+    if (state.metrics.audio) {
+      const rows = [
+        ["Duration", formatMetricNumber(report.audio.durationSeconds, 3) + " s"],
+        ["Sample rate", formatMetricNumber(report.audio.sampleRate, 0) + " Hz"],
+        ["Channels", String(report.audio.channelCount)],
+        ["RMS", formatMetricNumber(report.audio.rms, 6)],
+        ["Peak |x|", formatMetricNumber(report.audio.peakAbs, 6)],
+        ["Crest factor", formatMetricNumber(report.audio.crestFactor, 3)],
+        ["ZCR", formatMetricNumber(report.audio.zcr, 6)],
+        ["Mean power", formatMetricNumber(report.features.power.meanPower, 8)],
+        ["Mean power (dB)", formatMetricNumber(report.audio.meanPowerDb, 2) + " dB"],
+        ["Clipping ratio", formatMetricPercent(report.audio.clippingRatio)]
+      ];
+      metricsContent.appendChild(createMetricsGroup("Audio Metrics", rows));
+    }
+
+    if (state.metrics.speech) {
+      const rows = [
+        ["Frame size", String(report.speech.frameSize) + " samples"],
+        ["Hop size", String(report.speech.hopSize) + " samples"],
+        ["Frame count", String(report.speech.frameCount)],
+        ["Silence ratio", formatMetricPercent(report.speech.silenceRatio)],
+        ["Speech activity ratio", formatMetricPercent(report.speech.speechActivityRatio)],
+        ["Voiced ratio", formatMetricPercent(report.speech.voicedRatio)],
+        ["Mean frame energy", formatMetricNumber(report.speech.meanFrameEnergyDb, 2) + " dB"],
+        ["Energy dynamic range", formatMetricNumber(report.speech.dynamicRangeDb, 2) + " dB"],
+        ["Speech SNR proxy", formatMetricNumber(report.speech.speechSnrProxyDb, 2) + " dB"]
+      ];
+      metricsContent.appendChild(createMetricsGroup("Speech Metrics (Heuristic)", rows));
+    }
+
+    if (state.metrics.statistical) {
+      const rows = [
+        ["Mean", formatMetricNumber(report.statistical.mean, 6)],
+        ["Std", formatMetricNumber(report.statistical.std, 6)],
+        ["Variance", formatMetricNumber(report.statistical.variance, 6)],
+        ["Min", formatMetricNumber(report.statistical.min, 6)],
+        ["Max", formatMetricNumber(report.statistical.max, 6)],
+        ["Median", formatMetricNumber(report.statistical.median, 6)],
+        ["Q25", formatMetricNumber(report.statistical.q25, 6)],
+        ["Q75", formatMetricNumber(report.statistical.q75, 6)],
+        ["IQR", formatMetricNumber(report.statistical.iqr, 6)],
+        ["Skewness", formatMetricNumber(report.statistical.skewness, 4)],
+        ["Kurtosis excess", formatMetricNumber(report.statistical.kurtosisExcess, 4)]
+      ];
+      metricsContent.appendChild(createMetricsGroup("Statistical Metrics", rows));
+    }
+
+    if (state.metrics.distributional) {
+      const rows = [
+        ["Entropy", formatMetricNumber(report.distributional.entropyBits, 4) + " bits"],
+        ["Moment m1", formatMetricNumber(report.distributional.moments.m1, 6)],
+        ["Moment m2", formatMetricNumber(report.distributional.moments.m2, 6)],
+        ["Moment m3", formatMetricNumber(report.distributional.moments.m3, 6)],
+        ["Moment m4", formatMetricNumber(report.distributional.moments.m4, 6)],
+        ["Histogram bins", String(report.distributional.histogram.counts.length)]
+      ];
+      metricsContent.appendChild(createMetricsGroup("Distributional Metrics", rows));
+      drawMetricsHistogram(report.distributional.histogram);
+    } else {
+      clearMetricsHistogram("Enable Distributional info to show histogram.");
+    }
+
+    if (state.metrics.classwise) {
+      metricsContent.appendChild(
+        createMetricsGroup("Classwise Metrics", [
+          ["Status", "Requires labels/metadata (planned for Phase 8)."]
+        ])
+      );
+    }
+
+    const featureRows = [];
+    if (state.features.power) {
+      featureRows.push([
+        "Power (mean)",
+        formatMetricNumber(report.features.power.meanPower, 8) +
+          " (" +
+          formatMetricNumber(report.features.power.meanPowerDb, 2) +
+          " dB)"
+      ]);
+    }
+    if (state.features.autocorrelation) {
+      featureRows.push([
+        "Autocorr peak lag",
+        String(report.features.autocorrelation.bestLag) +
+          " (corr=" +
+          formatMetricNumber(report.features.autocorrelation.bestCorrelation, 4) +
+          ")"
+      ]);
+      featureRows.push([
+        "Estimated F0",
+        report.features.autocorrelation.estimatedF0Hz > 0
+          ? formatMetricNumber(report.features.autocorrelation.estimatedF0Hz, 2) + " Hz"
+          : "n/a"
+      ]);
+    }
+    if (state.features.shortTimePower) {
+      featureRows.push([
+        "Short-time power mean",
+        formatMetricNumber(report.features.shortTimePower.frameMean, 8)
+      ]);
+      featureRows.push([
+        "Short-time power std",
+        formatMetricNumber(report.features.shortTimePower.frameStd, 8)
+      ]);
+      featureRows.push([
+        "Short-time power p05/p95",
+        formatMetricNumber(report.features.shortTimePower.frameP05, 8) +
+          " / " +
+          formatMetricNumber(report.features.shortTimePower.frameP95, 8)
+      ]);
+    }
+    if (state.features.shortTimeAutocorrelation) {
+      featureRows.push([
+        "Short-time autocorr lag",
+        String(report.features.shortTimeAutocorrelation.bestLag) +
+          " (corr=" +
+          formatMetricNumber(report.features.shortTimeAutocorrelation.bestCorrelation, 4) +
+          ")"
+      ]);
+    }
+    if (featureRows.length > 0) {
+      metricsContent.appendChild(createMetricsGroup("Feature Diagnostics", featureRows));
+    }
+
+    if (metricsContent.childElementCount === 0) {
+      metricsContent.appendChild(
+        createMetricsGroup("Metrics", [
+          ["Status", "Enable one or more metrics toggles in the right panel."]
+        ])
+      );
+    }
   }
 
   function splitCsvLine(line) {
@@ -4333,6 +5235,7 @@
       empty.className = "transform-empty";
       empty.textContent = "No transform views selected. Add one with \"Add View\".";
       renderStackContainer.appendChild(empty);
+      renderMetricsReport();
       return;
     }
 
@@ -4504,6 +5407,7 @@
     }
 
     updateAnimatedPlayheads();
+    renderMetricsReport();
   }
 
   function updateAnimatedPlayheads() {
@@ -4747,47 +5651,90 @@
 
   metricAudio.addEventListener("change", function () {
     state.metrics.audio = metricAudio.checked;
+    renderMetricsReport();
     postState();
   });
 
   metricSpeech.addEventListener("change", function () {
     state.metrics.speech = metricSpeech.checked;
+    renderMetricsReport();
     postState();
   });
 
   metricStatistical.addEventListener("change", function () {
     state.metrics.statistical = metricStatistical.checked;
+    renderMetricsReport();
     postState();
   });
 
   metricDistributional.addEventListener("change", function () {
     state.metrics.distributional = metricDistributional.checked;
+    renderMetricsReport();
     postState();
   });
 
   metricClasswise.addEventListener("change", function () {
     state.metrics.classwise = metricClasswise.checked;
+    renderMetricsReport();
     postState();
   });
 
   featurePower.addEventListener("change", function () {
     state.features.power = featurePower.checked;
+    renderMetricsReport();
     postState();
   });
 
   featureAutocorrelation.addEventListener("change", function () {
     state.features.autocorrelation = featureAutocorrelation.checked;
+    renderMetricsReport();
     postState();
   });
 
   featureShorttimePower.addEventListener("change", function () {
     state.features.shortTimePower = featureShorttimePower.checked;
+    renderMetricsReport();
     postState();
   });
 
   featureShorttimeAutocorrelation.addEventListener("change", function () {
     state.features.shortTimeAutocorrelation = featureShorttimeAutocorrelation.checked;
+    renderMetricsReport();
     postState();
+  });
+
+  metricsExportJson.addEventListener("click", function () {
+    const report = getPrimaryMetricsReport();
+    if (!report) {
+      setAudioStatus("No decoded primary audio loaded for metrics export.");
+      return;
+    }
+
+    try {
+      const payload = buildMetricsExportModel(report);
+      const json = JSON.stringify(payload, null, 2);
+      triggerTextDownload(metricsExportBaseName() + "-metrics.json", "application/json", json);
+      metricsStatus.textContent = "Exported metrics JSON.";
+    } catch (error) {
+      metricsStatus.textContent = "Failed to export JSON: " + toErrorText(error);
+    }
+  });
+
+  metricsExportCsv.addEventListener("click", function () {
+    const report = getPrimaryMetricsReport();
+    if (!report) {
+      setAudioStatus("No decoded primary audio loaded for metrics export.");
+      return;
+    }
+
+    try {
+      const payload = buildMetricsExportModel(report);
+      const csv = buildMetricsCsv(payload);
+      triggerTextDownload(metricsExportBaseName() + "-metrics.csv", "text/csv", csv);
+      metricsStatus.textContent = "Exported metrics CSV.";
+    } catch (error) {
+      metricsStatus.textContent = "Failed to export CSV: " + toErrorText(error);
+    }
   });
 
   pcaEnabled.addEventListener("change", function () {

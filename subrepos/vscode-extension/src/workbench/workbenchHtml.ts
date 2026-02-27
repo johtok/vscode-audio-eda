@@ -92,6 +92,19 @@ export function buildWorkbenchHtml(
         <p class="hint">Reorder by dragging rows with the <strong>|||</strong> handle.</p>
         <p class="hint">Each row has its own <strong>Settings</strong> panel for transform-specific hyperparameters.</p>
         <div id="transform-render-stack" class="render-stack"></div>
+
+        <section class="metrics-report-panel">
+          <div class="panel-header">
+            <h2>Metrics Report</h2>
+            <div class="metrics-report-actions">
+              <button id="metrics-export-json" type="button">Export JSON</button>
+              <button id="metrics-export-csv" type="button">Export CSV</button>
+            </div>
+          </div>
+          <p id="metrics-status" class="hint">Load a primary audio clip to compute metrics.</p>
+          <div id="metrics-content" class="metrics-content"></div>
+          <canvas id="metrics-histogram" class="metrics-histogram" width="720" height="220"></canvas>
+        </section>
       </section>
 
       <section class="panel controls-panel">
