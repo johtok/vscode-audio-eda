@@ -6091,23 +6091,8 @@
       row.className = "stack-item";
       row.draggable = true;
       row.dataset.index = String(index);
-      let suppressDragStart = false;
-
-      const markSuppressDragStart = function () {
-        suppressDragStart = true;
-      };
-      const clearSuppressDragStartSoon = function () {
-        window.setTimeout(function () {
-          suppressDragStart = false;
-        }, 0);
-      };
 
       row.addEventListener("dragstart", function (event) {
-        if (suppressDragStart) {
-          event.preventDefault();
-          return;
-        }
-
         dragIndex = index;
         if (event.dataTransfer) {
           event.dataTransfer.effectAllowed = "move";
@@ -6164,7 +6149,7 @@
         transformSelect.appendChild(option);
       });
 
-      const applyTransformSelection = function () {
+      transformSelect.addEventListener("change", function () {
         if (transformSelect.value.indexOf("stft::") === 0) {
           const mode = transformSelect.value.split("::")[1] === "phase" ? "phase" : "magnitude";
           item.kind = "stft";
@@ -6177,18 +6162,7 @@
         renderStackControls();
         renderTransformStack();
         postState();
-      };
-
-      transformSelect.addEventListener("pointerdown", markSuppressDragStart);
-      transformSelect.addEventListener("mousedown", markSuppressDragStart);
-      transformSelect.addEventListener("touchstart", markSuppressDragStart, { passive: true });
-      transformSelect.addEventListener("focus", markSuppressDragStart);
-      transformSelect.addEventListener("blur", clearSuppressDragStartSoon);
-      transformSelect.addEventListener("change", function () {
-        applyTransformSelection();
-        clearSuppressDragStartSoon();
       });
-      transformSelect.addEventListener("input", applyTransformSelection);
 
       const settingsButton = document.createElement("button");
       settingsButton.type = "button";
@@ -6197,7 +6171,6 @@
       settingsButton.addEventListener("click", function (event) {
         event.preventDefault();
         event.stopPropagation();
-        suppressDragStart = true;
         if (expandedRowSettingsIds.has(item.id)) {
           expandedRowSettingsIds.delete(item.id);
         } else {
@@ -6211,7 +6184,6 @@
       removeButton.className = "remove-button";
       removeButton.textContent = "Remove";
       removeButton.addEventListener("click", function () {
-        suppressDragStart = true;
         state.stack.splice(index, 1);
         expandedRowSettingsIds.delete(item.id);
         renderStackControls();
