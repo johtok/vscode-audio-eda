@@ -6089,8 +6089,32 @@
 
       const row = document.createElement("li");
       row.className = "stack-item";
-      row.draggable = false;
+      row.draggable = true;
       row.dataset.index = String(index);
+
+      row.addEventListener("dragstart", function (event) {
+        const target = event.target;
+        if (
+          target instanceof Element &&
+          target.closest("select,option,input,textarea,button:not(.drag-handle),a")
+        ) {
+          event.preventDefault();
+          return;
+        }
+
+        dragIndex = index;
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", String(index));
+        }
+        row.classList.add("dragging");
+      });
+
+      row.addEventListener("dragend", function () {
+        dragIndex = null;
+        row.classList.remove("dragging");
+        row.classList.remove("drag-over");
+      });
 
       row.addEventListener("dragover", function (event) {
         event.preventDefault();
@@ -6121,22 +6145,6 @@
       handle.textContent = "|||";
       handle.title = "Drag to reorder";
       handle.setAttribute("aria-label", "Drag to reorder");
-      handle.draggable = true;
-
-      handle.addEventListener("dragstart", function (event) {
-        dragIndex = index;
-        if (event.dataTransfer) {
-          event.dataTransfer.effectAllowed = "move";
-          event.dataTransfer.setData("text/plain", String(index));
-        }
-        row.classList.add("dragging");
-      });
-
-      handle.addEventListener("dragend", function () {
-        dragIndex = null;
-        row.classList.remove("dragging");
-        row.classList.remove("drag-over");
-      });
 
       const transformSelect = document.createElement("select");
       transformSelect.className = "transform-select";
