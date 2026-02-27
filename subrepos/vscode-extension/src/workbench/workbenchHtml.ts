@@ -102,6 +102,20 @@ export function buildWorkbenchHtml(
             </div>
           </div>
           <p id="metrics-status" class="hint">Load a primary audio clip to compute metrics.</p>
+          <div class="metrics-histogram-controls">
+            <label class="metrics-histogram-control" for="metrics-histogram-bins">
+              Histogram bins
+              <input id="metrics-histogram-bins" type="number" min="4" max="512" step="1" />
+            </label>
+            <label class="metrics-histogram-control" for="metrics-histogram-range-min">
+              Histogram min
+              <input id="metrics-histogram-range-min" type="number" min="-10" max="10" step="0.001" />
+            </label>
+            <label class="metrics-histogram-control" for="metrics-histogram-range-max">
+              Histogram max
+              <input id="metrics-histogram-range-max" type="number" min="-10" max="10" step="0.001" />
+            </label>
+          </div>
           <div id="metrics-content" class="metrics-content"></div>
           <canvas id="metrics-histogram" class="metrics-histogram" width="720" height="220"></canvas>
         </section>

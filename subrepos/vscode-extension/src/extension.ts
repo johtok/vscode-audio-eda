@@ -358,6 +358,33 @@ function sanitizeWorkbenchStatePayload(rawState: unknown): unknown | undefined {
       sanitized.metrics.distributional
     );
     sanitized.metrics.classwise = sanitizeBoolean(metrics.classwise, sanitized.metrics.classwise);
+    sanitized.metrics.histogramBins = sanitizeInteger(
+      metrics.histogramBins,
+      sanitized.metrics.histogramBins,
+      4,
+      512
+    );
+    sanitized.metrics.histogramRangeMin = sanitizeNumber(
+      metrics.histogramRangeMin,
+      sanitized.metrics.histogramRangeMin,
+      -10,
+      10
+    );
+    sanitized.metrics.histogramRangeMax = sanitizeNumber(
+      metrics.histogramRangeMax,
+      sanitized.metrics.histogramRangeMax,
+      -10,
+      10
+    );
+    if (sanitized.metrics.histogramRangeMax <= sanitized.metrics.histogramRangeMin) {
+      if (sanitized.metrics.histogramRangeMin >= 10) {
+        sanitized.metrics.histogramRangeMin = 9.999;
+      }
+      sanitized.metrics.histogramRangeMax = Math.min(
+        10,
+        sanitized.metrics.histogramRangeMin + 0.001
+      );
+    }
   }
 
   const features = asRecord(record.features);

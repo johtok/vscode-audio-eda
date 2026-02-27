@@ -486,6 +486,21 @@ input.is-locked {
   gap: 8px;
 }
 
+.metrics-histogram-controls {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.metrics-histogram-control {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.74rem;
+  color: var(--vscode-descriptionForeground);
+}
+
 .metrics-group {
   border: 1px solid color-mix(in srgb, var(--vscode-panel-border) 78%, #2f8aab 22%);
   border-radius: 6px;

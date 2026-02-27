@@ -66,6 +66,9 @@ export interface WorkbenchState {
     statistical: boolean;
     distributional: boolean;
     classwise: boolean;
+    histogramBins: number;
+    histogramRangeMin: number;
+    histogramRangeMax: number;
   };
   features: {
     power: boolean;
@@ -160,7 +163,10 @@ export function createDefaultWorkbenchState(): WorkbenchState {
       speech: false,
       statistical: true,
       distributional: true,
-      classwise: false
+      classwise: false,
+      histogramBins: 128,
+      histogramRangeMin: -1,
+      histogramRangeMax: 1
     },
     features: {
       power: true,

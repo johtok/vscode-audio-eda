@@ -48,7 +48,9 @@
   const MAX_FILTERBANK_CSV_INPUT_BYTES = 2 * 1024 * 1024;
   const MAX_FILTERBANK_ROWS = 2048;
   const MAX_FILTERBANK_COLUMNS = 8192;
-  const METRICS_HISTOGRAM_BINS = 64;
+  const METRICS_HISTOGRAM_BINS = 128;
+  const METRICS_HISTOGRAM_RANGE_MIN = -10;
+  const METRICS_HISTOGRAM_RANGE_MAX = 10;
   const METRICS_DISTRIBUTION_SAMPLE_LIMIT = 200000;
   const METRICS_FRAME_SIZE_SECONDS = 0.03;
   const METRICS_HOP_SIZE_SECONDS = 0.01;
@@ -111,7 +113,10 @@
       speech: false,
       statistical: true,
       distributional: true,
-      classwise: false
+      classwise: false,
+      histogramBins: METRICS_HISTOGRAM_BINS,
+      histogramRangeMin: -1,
+      histogramRangeMax: 1
     },
     features: {
       power: true,
@@ -178,6 +183,9 @@
   const metricStatistical = byId("metric-statistical");
   const metricDistributional = byId("metric-distributional");
   const metricClasswise = byId("metric-classwise");
+  const metricsHistogramBinsInput = byId("metrics-histogram-bins");
+  const metricsHistogramRangeMinInput = byId("metrics-histogram-range-min");
+  const metricsHistogramRangeMaxInput = byId("metrics-histogram-range-max");
   const metricsStatus = byId("metrics-status");
   const metricsContent = byId("metrics-content");
   const metricsHistogramCanvas = byId("metrics-histogram");
@@ -480,6 +488,33 @@
           merged.metrics.distributional
         );
         merged.metrics.classwise = sanitizeBooleanValue(metrics.classwise, merged.metrics.classwise);
+        merged.metrics.histogramBins = sanitizeInt(
+          metrics.histogramBins,
+          merged.metrics.histogramBins,
+          4,
+          512
+        );
+        merged.metrics.histogramRangeMin = sanitizeFloat(
+          metrics.histogramRangeMin,
+          merged.metrics.histogramRangeMin,
+          METRICS_HISTOGRAM_RANGE_MIN,
+          METRICS_HISTOGRAM_RANGE_MAX
+        );
+        merged.metrics.histogramRangeMax = sanitizeFloat(
+          metrics.histogramRangeMax,
+          merged.metrics.histogramRangeMax,
+          METRICS_HISTOGRAM_RANGE_MIN,
+          METRICS_HISTOGRAM_RANGE_MAX
+        );
+        if (merged.metrics.histogramRangeMax <= merged.metrics.histogramRangeMin) {
+          if (merged.metrics.histogramRangeMin >= METRICS_HISTOGRAM_RANGE_MAX) {
+            merged.metrics.histogramRangeMin = METRICS_HISTOGRAM_RANGE_MAX - 0.001;
+          }
+          merged.metrics.histogramRangeMax = Math.min(
+            METRICS_HISTOGRAM_RANGE_MAX,
+            merged.metrics.histogramRangeMin + 0.001
+          );
+        }
       }
 
       const features = asRecord(restoredState.features);
@@ -1134,6 +1169,7 @@
   }
 
   function syncControlsFromState() {
+    const histogramConfig = getMetricsHistogramConfig();
     overlayEnabled.checked = state.overlay.enabled;
     overlayMode.value = state.overlay.mode;
     overlayFlagColor.value = sanitizeHexColor(state.overlay.flagColor, DEFAULT_FLAG_OVERLAY_COLOR);
@@ -1147,6 +1183,9 @@
     metricStatistical.checked = state.metrics.statistical;
     metricDistributional.checked = state.metrics.distributional;
     metricClasswise.checked = state.metrics.classwise;
+    metricsHistogramBinsInput.value = String(histogramConfig.bins);
+    metricsHistogramRangeMinInput.value = formatMetricNumber(histogramConfig.min, 3);
+    metricsHistogramRangeMaxInput.value = formatMetricNumber(histogramConfig.max, 3);
 
     featurePower.checked = state.features.power;
     featureAutocorrelation.checked = state.features.autocorrelation;
@@ -1169,20 +1208,8 @@
     return mergeBootstrapState(DEFAULT_BOOTSTRAP_STATE, state);
   }
 
-  function applyPersistableStateSnapshot(snapshot) {
-    state.stack = snapshot.stack;
-    state.overlay = snapshot.overlay;
-    state.comparison = snapshot.comparison;
-    state.metrics = snapshot.metrics;
-    state.features = snapshot.features;
-    state.pca = snapshot.pca;
-    state.multichannel = snapshot.multichannel;
-    state.transformParams = snapshot.transformParams;
-  }
-
   function postState() {
     const snapshot = createPersistableStateSnapshot();
-    applyPersistableStateSnapshot(snapshot);
 
     if (typeof vscode.setState === "function") {
       vscode.setState(snapshot);
@@ -1414,6 +1441,38 @@
       total: values.length,
       entropyBits
     };
+  }
+
+  function getMetricsHistogramConfig() {
+    const bins = sanitizeInt(state.metrics.histogramBins, METRICS_HISTOGRAM_BINS, 4, 512);
+    let min = sanitizeFloat(
+      state.metrics.histogramRangeMin,
+      -1,
+      METRICS_HISTOGRAM_RANGE_MIN,
+      METRICS_HISTOGRAM_RANGE_MAX
+    );
+    let max = sanitizeFloat(
+      state.metrics.histogramRangeMax,
+      1,
+      METRICS_HISTOGRAM_RANGE_MIN,
+      METRICS_HISTOGRAM_RANGE_MAX
+    );
+
+    if (max <= min) {
+      if (min >= METRICS_HISTOGRAM_RANGE_MAX) {
+        min = METRICS_HISTOGRAM_RANGE_MAX - 0.001;
+      }
+      max = Math.min(METRICS_HISTOGRAM_RANGE_MAX, min + 0.001);
+      if (max <= min) {
+        min = Math.max(METRICS_HISTOGRAM_RANGE_MIN, max - 0.001);
+      }
+    }
+
+    state.metrics.histogramBins = bins;
+    state.metrics.histogramRangeMin = min;
+    state.metrics.histogramRangeMax = max;
+
+    return { bins, min, max };
   }
 
   function meanOfNumbers(values) {
@@ -2282,7 +2341,13 @@
         ? activeEnergyAccum / activeEnergyCount - inactiveEnergyAccum / inactiveEnergyCount
         : 0;
 
-    const histogram = summarizeHistogram(distributionSample, METRICS_HISTOGRAM_BINS, -1, 1);
+    const histogramConfig = getMetricsHistogramConfig();
+    const histogram = summarizeHistogram(
+      distributionSample,
+      histogramConfig.bins,
+      histogramConfig.min,
+      histogramConfig.max
+    );
     const autocorrelation = summarizeAutocorrelation(samples, sampleRate);
     const shortTimeAuto = summarizeAutocorrelation(Float32Array.from(frameSummary.energyByFrame), 100);
     const correlationTimeSeconds = estimateCorrelationTime(samples, sampleRate);
@@ -2420,6 +2485,7 @@
       },
       distributional: {
         histogram,
+        histogramConfig,
         moments: {
           m1: mean,
           m2: variance,
@@ -2451,7 +2517,15 @@
       return null;
     }
 
-    const cacheKey = metricsAudioKey(primaryAudio);
+    const histogramConfig = getMetricsHistogramConfig();
+    const cacheKey =
+      metricsAudioKey(primaryAudio) +
+      "::hist::" +
+      histogramConfig.bins +
+      "::" +
+      histogramConfig.min.toFixed(6) +
+      "::" +
+      histogramConfig.max.toFixed(6);
     if (metricsCache.cacheKey === cacheKey && metricsCache.report) {
       return metricsCache.report;
     }
@@ -2737,6 +2811,7 @@
       return;
     }
     const report = getPrimaryMetricsReport();
+    const histogramConfig = getMetricsHistogramConfig();
     const widthSignature = Math.round(metricsHistogramCanvas.clientWidth || 0);
     const signature =
       (report ? metricsAudioKey(primaryAudio) : "none") +
@@ -2750,7 +2825,13 @@
         state.features.autocorrelation,
         state.features.shortTimePower,
         state.features.shortTimeAutocorrelation
-      ].join(",");
+      ].join(",") +
+      "|" +
+      histogramConfig.bins +
+      "|" +
+      histogramConfig.min.toFixed(6) +
+      "|" +
+      histogramConfig.max.toFixed(6);
 
     if (signature === metricsRenderSignature) {
       return;
@@ -3000,16 +3081,22 @@
     }
 
     if (state.metrics.distributional) {
+      const histogram = report.distributional.histogram;
       const rows = [
         ["Entropy", formatMetricNumber(report.distributional.entropyBits, 4) + " bits"],
         ["Moment m1", formatMetricNumber(report.distributional.moments.m1, 6)],
         ["Moment m2", formatMetricNumber(report.distributional.moments.m2, 6)],
         ["Moment m3", formatMetricNumber(report.distributional.moments.m3, 6)],
         ["Moment m4", formatMetricNumber(report.distributional.moments.m4, 6)],
-        ["Histogram bins", String(report.distributional.histogram.counts.length)]
+        ["Histogram bins", String(histogram.counts.length)],
+        [
+          "Histogram range",
+          formatMetricNumber(histogram.min, 3) + " .. " + formatMetricNumber(histogram.max, 3)
+        ],
+        ["Histogram bin width", formatMetricNumber(histogram.binWidth, 6)]
       ];
       metricsContent.appendChild(createMetricsGroup("Distributional Metrics", rows));
-      drawMetricsHistogram(report.distributional.histogram);
+      drawMetricsHistogram(histogram);
     } else {
       clearMetricsHistogram("Enable Distributional info to show histogram.");
     }
@@ -6758,6 +6845,19 @@
     onTransformParamsChanged();
   });
 
+  function onMetricsHistogramControlsChanged() {
+    state.metrics.histogramBins = metricsHistogramBinsInput.value;
+    state.metrics.histogramRangeMin = metricsHistogramRangeMinInput.value;
+    state.metrics.histogramRangeMax = metricsHistogramRangeMaxInput.value;
+    const histogramConfig = getMetricsHistogramConfig();
+    metricsHistogramBinsInput.value = String(histogramConfig.bins);
+    metricsHistogramRangeMinInput.value = formatMetricNumber(histogramConfig.min, 3);
+    metricsHistogramRangeMaxInput.value = formatMetricNumber(histogramConfig.max, 3);
+    metricsRenderSignature = "";
+    renderMetricsReport();
+    postState();
+  }
+
   metricAudio.addEventListener("change", function () {
     state.metrics.audio = metricAudio.checked;
     renderMetricsReport();
@@ -6787,6 +6887,10 @@
     renderMetricsReport();
     postState();
   });
+
+  metricsHistogramBinsInput.addEventListener("change", onMetricsHistogramControlsChanged);
+  metricsHistogramRangeMinInput.addEventListener("change", onMetricsHistogramControlsChanged);
+  metricsHistogramRangeMaxInput.addEventListener("change", onMetricsHistogramControlsChanged);
 
   featurePower.addEventListener("change", function () {
     state.features.power = featurePower.checked;
