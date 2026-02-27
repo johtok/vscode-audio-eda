@@ -589,9 +589,35 @@ function getAudioUriFromArgs(uri?: vscode.Uri): vscode.Uri | undefined {
     return uri;
   }
 
-  const activeUri = vscode.window.activeTextEditor?.document.uri;
+  const activeUri = getActiveEditorUri();
   if (isAudioUri(activeUri)) {
     return activeUri;
+  }
+
+  return undefined;
+}
+
+function getActiveEditorUri(): vscode.Uri | undefined {
+  const fromTextEditor = vscode.window.activeTextEditor?.document.uri;
+  if (fromTextEditor) {
+    return fromTextEditor;
+  }
+
+  const tabInput = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+  if (!tabInput) {
+    return undefined;
+  }
+
+  if (tabInput instanceof vscode.TabInputText) {
+    return tabInput.uri;
+  }
+
+  if (tabInput instanceof vscode.TabInputCustom) {
+    return tabInput.uri;
+  }
+
+  if (tabInput instanceof vscode.TabInputNotebook) {
+    return tabInput.uri;
   }
 
   return undefined;
@@ -602,7 +628,7 @@ async function resolveAudioFilePath(uri?: vscode.Uri): Promise<string | undefine
     return uri.fsPath;
   }
 
-  const activeUri = vscode.window.activeTextEditor?.document.uri;
+  const activeUri = getActiveEditorUri();
   if (activeUri?.scheme === "file") {
     return activeUri.fsPath;
   }
@@ -858,7 +884,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const reopenActiveWithAudioEdaCommand = vscode.commands.registerCommand(
     "audioEda.reopenActiveWithAudioEda",
     async () => {
-      const activeUri = vscode.window.activeTextEditor?.document.uri;
+      const activeUri = getActiveEditorUri();
       if (!isAudioUri(activeUri)) {
         void vscode.window.showWarningMessage(
           "Active editor is not a supported audio file (.wav/.flac/.mp3/.mpga/.mpeg/.ogg/.m4a/.aac/.opus/.sph)."

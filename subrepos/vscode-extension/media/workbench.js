@@ -6173,6 +6173,24 @@
         postState();
       });
 
+      const suspendRowDrag = function () {
+        row.draggable = false;
+      };
+      const resumeRowDrag = function () {
+        row.draggable = true;
+      };
+
+      transformSelect.addEventListener("pointerdown", suspendRowDrag);
+      transformSelect.addEventListener("mousedown", suspendRowDrag);
+      transformSelect.addEventListener("focus", suspendRowDrag);
+      transformSelect.addEventListener("blur", resumeRowDrag);
+      transformSelect.addEventListener("click", function (event) {
+        event.stopPropagation();
+      });
+      transformSelect.addEventListener("change", function () {
+        window.setTimeout(resumeRowDrag, 0);
+      });
+
       const settingsButton = document.createElement("button");
       settingsButton.type = "button";
       settingsButton.className = "row-settings-button";
@@ -6180,6 +6198,7 @@
       settingsButton.addEventListener("click", function (event) {
         event.preventDefault();
         event.stopPropagation();
+        row.draggable = false;
         if (expandedRowSettingsIds.has(item.id)) {
           expandedRowSettingsIds.delete(item.id);
         } else {
@@ -6193,6 +6212,7 @@
       removeButton.className = "remove-button";
       removeButton.textContent = "Remove";
       removeButton.addEventListener("click", function () {
+        row.draggable = false;
         state.stack.splice(index, 1);
         expandedRowSettingsIds.delete(item.id);
         renderStackControls();
