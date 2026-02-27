@@ -1,11 +1,27 @@
 import * as vscode from "vscode";
+import * as path from "path";
 import { createDefaultWorkbenchState } from "./workbenchState";
 
-export function getWorkbenchLocalResourceRoots(extensionUri: vscode.Uri): vscode.Uri[] {
-  return [
-    vscode.Uri.joinPath(extensionUri, "media"),
-    ...(vscode.workspace.workspaceFolders?.map((folder) => folder.uri) ?? [])
-  ];
+export function getWorkbenchLocalResourceRoots(
+  extensionUri: vscode.Uri,
+  additionalFileUris: readonly vscode.Uri[] = []
+): vscode.Uri[] {
+  const roots = [vscode.Uri.joinPath(extensionUri, "media")];
+  for (const uri of additionalFileUris) {
+    if (uri.scheme === "file") {
+      roots.push(vscode.Uri.file(path.dirname(uri.fsPath)));
+    }
+  }
+
+  const seen = new Set<string>();
+  return roots.filter((uri) => {
+    const key = uri.toString();
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function resolveBootstrapState(initialState?: unknown): unknown {
@@ -16,6 +32,15 @@ function resolveBootstrapState(initialState?: unknown): unknown {
   return initialState;
 }
 
+function serializeBootstrapForInlineScript(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003C")
+    .replace(/>/g, "\\u003E")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
 export function buildWorkbenchHtml(
   webview: vscode.Webview,
   extensionUri: vscode.Uri,
@@ -24,7 +49,7 @@ export function buildWorkbenchHtml(
   const nonce = createNonce();
   const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "workbench.js"));
   const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "workbench.css"));
-  const bootstrap = JSON.stringify(resolveBootstrapState(initialState));
+  const bootstrap = serializeBootstrapForInlineScript(resolveBootstrapState(initialState));
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -124,7 +149,7 @@ export function buildWorkbenchHtml(
         <label class="row" for="stft-max-analysis-seconds">STFT max analysis seconds</label>
         <input id="stft-max-analysis-seconds" type="number" min="1" max="600" step="1" />
         <label class="row" for="stft-max-frames">STFT max frames</label>
-        <input id="stft-max-frames" type="number" min="32" max="5000" step="1" />
+        <input id="stft-max-frames" type="number" min="32" max="2000" step="1" />
 
         <label class="row" for="mel-bands">Mel bands</label>
         <input id="mel-bands" type="number" min="8" max="256" step="1" />

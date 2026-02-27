@@ -186,6 +186,7 @@
         "audioEda.toolboxPath": {
           "type": "string",
           "default": "audio-eda",
+          "scope": "machine-overridable",
           "description": "Path to the Python toolbox executable."
         },
         "audioEda.openWorkbenchOnStart": {

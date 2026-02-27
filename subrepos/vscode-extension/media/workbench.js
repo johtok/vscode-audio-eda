@@ -30,8 +30,24 @@
     "stacked",
     "stacked_difference"
   ];
+  const STACK_ITEM_KINDS = ["timeseries", "stft", "mel", "mfcc", "dct", "custom_filterbank"];
+  const OVERLAY_MODES = ["flag", "timestamped"];
+  const WORKSPACE_PRESET_IDS = ["default", "transforms", "metrics", "pca"];
   const DEFAULT_FLAG_OVERLAY_COLOR = "#ef4444";
+  const MAX_STACK_ITEMS = 24;
+  const MAX_RESTORED_STACK_SCAN = MAX_STACK_ITEMS * 4;
+  const MAX_LOCAL_WEBVIEW_STATE_BYTES = 1000000;
+  const MAX_TEXT_FIELD_CHARS = 256;
   const MAX_PERSISTED_OVERLAY_CSV_CHARS = 500000;
+  const MAX_STFT_FRAMES = 2000;
+  const MAX_AUDIO_DECODE_BYTES = 128 * 1024 * 1024;
+  const MAX_DECODED_PCM_BYTES = 256 * 1024 * 1024;
+  const MAX_OVERLAY_CSV_INPUT_BYTES = 2 * 1024 * 1024;
+  const MAX_OVERLAY_CSV_ROWS = 200000;
+  const MAX_OVERLAY_CSV_COLUMNS = 64;
+  const MAX_FILTERBANK_CSV_INPUT_BYTES = 2 * 1024 * 1024;
+  const MAX_FILTERBANK_ROWS = 2048;
+  const MAX_FILTERBANK_COLUMNS = 8192;
   const DEFAULT_TRANSFORM_PARAMS = {
     stft: {
       mode: "magnitude",
@@ -66,7 +82,7 @@
     enhancement: "Speech enhancement: GEVD/EVD on speech vs noise covariance matrices."
   };
 
-  const bootstrapBase = window.__AUDIO_EDA_BOOTSTRAP__ || {
+  const DEFAULT_BOOTSTRAP_STATE = {
     stack: [],
     overlay: {
       enabled: false,
@@ -94,10 +110,14 @@
     transformParams: DEFAULT_TRANSFORM_PARAMS
   };
 
+  const initialStateFromExtension = window.__AUDIO_EDA_BOOTSTRAP__;
   const persistedState =
     typeof vscode.getState === "function" ? vscode.getState() : undefined;
-  const bootstrap = mergeBootstrapState(bootstrapBase, persistedState);
-  const state = JSON.parse(JSON.stringify(bootstrap));
+  const state = mergeBootstrapState(
+    DEFAULT_BOOTSTRAP_STATE,
+    initialStateFromExtension,
+    persistedState
+  );
   ensureOverlayState();
   ensureComparisonState();
   ensureTransformParamState();
@@ -188,73 +208,303 @@
     return JSON.parse(JSON.stringify(DEFAULT_TRANSFORM_PARAMS));
   }
 
-  function mergeBootstrapState(baseState, restoredState) {
-    const merged = JSON.parse(JSON.stringify(baseState));
-    if (!restoredState || typeof restoredState !== "object") {
-      return merged;
+  function asRecord(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return null;
+    }
+    return value;
+  }
+
+  function sanitizeBooleanValue(value, fallback) {
+    return typeof value === "boolean" ? value : fallback;
+  }
+
+  function sanitizeStringValue(value, maxLength) {
+    if (typeof value !== "string") {
+      return null;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    return trimmed.length > maxLength ? trimmed.slice(0, maxLength) : trimmed;
+  }
+
+  function sanitizeWebviewAudioUri(value) {
+    const sanitized = sanitizeStringValue(value, 4096);
+    if (!sanitized) {
+      return null;
     }
 
-    if (Array.isArray(restoredState.stack)) {
-      merged.stack = restoredState.stack;
+    if (
+      sanitized.indexOf("vscode-webview-resource:") === 0 ||
+      sanitized.indexOf("vscode-webview://") === 0
+    ) {
+      return sanitized;
     }
 
-    if (restoredState.overlay && typeof restoredState.overlay === "object") {
-      merged.overlay = Object.assign({}, merged.overlay, restoredState.overlay);
+    return null;
+  }
+
+  function sanitizeStackKind(rawKind) {
+    if (rawKind === "magnitude_spectrogram") {
+      return { kind: "stft", forceStftMode: "magnitude" };
+    }
+    if (rawKind === "phase_spectrogram") {
+      return { kind: "stft", forceStftMode: "phase" };
+    }
+    if (typeof rawKind === "string" && STACK_ITEM_KINDS.indexOf(rawKind) !== -1) {
+      return { kind: rawKind };
+    }
+    return { kind: "timeseries" };
+  }
+
+  function sanitizeStackItemForState(rawItem, index) {
+    const record = asRecord(rawItem);
+    if (!record) {
+      return null;
     }
 
-    if (restoredState.comparison && typeof restoredState.comparison === "object") {
-      merged.comparison = Object.assign({}, merged.comparison, restoredState.comparison);
+    const kindInfo = sanitizeStackKind(record.kind);
+    const paramsRecord = asRecord(record.params);
+    const item = {
+      id: sanitizeStringValue(record.id, 128) || "view-" + Date.now() + "-" + index,
+      kind: kindInfo.kind,
+      params: {}
+    };
+
+    if (
+      item.kind === "stft" ||
+      item.kind === "mel" ||
+      item.kind === "mfcc" ||
+      item.kind === "dct" ||
+      item.kind === "custom_filterbank"
+    ) {
+      const stft = sanitizeStftParams(asRecord(paramsRecord && paramsRecord.stft));
+      if (kindInfo.forceStftMode) {
+        stft.mode = kindInfo.forceStftMode;
+      }
+      item.params.stft = stft;
     }
 
-    if (restoredState.metrics && typeof restoredState.metrics === "object") {
-      merged.metrics = Object.assign({}, merged.metrics, restoredState.metrics);
+    if (item.kind === "mel" || item.kind === "mfcc") {
+      item.params.mel = sanitizeMelParams(asRecord(paramsRecord && paramsRecord.mel), 48000);
     }
 
-    if (restoredState.features && typeof restoredState.features === "object") {
-      merged.features = Object.assign({}, merged.features, restoredState.features);
+    if (item.kind === "mfcc") {
+      item.params.mfcc = sanitizeMfccParams(asRecord(paramsRecord && paramsRecord.mfcc), 128);
     }
 
-    if (restoredState.pca && typeof restoredState.pca === "object") {
-      merged.pca = Object.assign({}, merged.pca, restoredState.pca);
+    if (item.kind === "dct") {
+      item.params.dct = sanitizeDctParams(asRecord(paramsRecord && paramsRecord.dct), 256);
     }
 
-    if (restoredState.multichannel && typeof restoredState.multichannel === "object") {
-      merged.multichannel = Object.assign({}, merged.multichannel, restoredState.multichannel);
+    return item;
+  }
+
+  function sanitizeStackCollection(rawStack) {
+    if (!Array.isArray(rawStack)) {
+      return [];
     }
 
-    if (restoredState.transformParams && typeof restoredState.transformParams === "object") {
-      merged.transformParams = Object.assign({}, merged.transformParams, restoredState.transformParams);
-      if (restoredState.transformParams.stft && typeof restoredState.transformParams.stft === "object") {
-        merged.transformParams.stft = Object.assign(
-          {},
-          merged.transformParams.stft,
-          restoredState.transformParams.stft
+    const sanitized = [];
+    const scanLimit = Math.min(rawStack.length, MAX_RESTORED_STACK_SCAN);
+    for (let index = 0; index < scanLimit; index += 1) {
+      if (sanitized.length >= MAX_STACK_ITEMS) {
+        break;
+      }
+
+      const item = sanitizeStackItemForState(rawStack[index], index);
+      if (item) {
+        sanitized.push(item);
+      }
+    }
+
+    return sanitized;
+  }
+
+  function sanitizePcaGoal(rawGoal, fallback) {
+    if (
+      typeof rawGoal === "string" &&
+      Object.prototype.hasOwnProperty.call(pcaGuidanceByGoal, rawGoal)
+    ) {
+      return rawGoal;
+    }
+    return fallback;
+  }
+
+  function estimateStateByteSize(value) {
+    try {
+      const serialized = JSON.stringify(value);
+      if (typeof serialized !== "string") {
+        return Number.POSITIVE_INFINITY;
+      }
+      return new TextEncoder().encode(serialized).length;
+    } catch {
+      return Number.POSITIVE_INFINITY;
+    }
+  }
+
+  function enforceStatePersistenceBounds(candidateState) {
+    const fallback = JSON.parse(JSON.stringify(DEFAULT_BOOTSTRAP_STATE));
+    let working = candidateState;
+    let byteSize = estimateStateByteSize(working);
+
+    if (!Number.isFinite(byteSize)) {
+      return fallback;
+    }
+
+    if (byteSize <= MAX_LOCAL_WEBVIEW_STATE_BYTES) {
+      return working;
+    }
+
+    const trimmed = JSON.parse(JSON.stringify(working));
+    working = trimmed;
+
+    if (trimmed.overlay && typeof trimmed.overlay === "object") {
+      trimmed.overlay.csvText = null;
+      byteSize = estimateStateByteSize(trimmed);
+      if (byteSize <= MAX_LOCAL_WEBVIEW_STATE_BYTES) {
+        return trimmed;
+      }
+    }
+
+    if (Array.isArray(trimmed.stack)) {
+      while (trimmed.stack.length > 1 && byteSize > MAX_LOCAL_WEBVIEW_STATE_BYTES) {
+        trimmed.stack.pop();
+        byteSize = estimateStateByteSize(trimmed);
+      }
+    }
+
+    if (byteSize <= MAX_LOCAL_WEBVIEW_STATE_BYTES) {
+      return trimmed;
+    }
+
+    return fallback;
+  }
+
+  function mergeBootstrapState(defaultState) {
+    const merged = JSON.parse(JSON.stringify(defaultState));
+
+    for (let argIndex = 1; argIndex < arguments.length; argIndex += 1) {
+      const restoredState = asRecord(arguments[argIndex]);
+      if (!restoredState) {
+        continue;
+      }
+
+      if (Array.isArray(restoredState.stack)) {
+        merged.stack = sanitizeStackCollection(restoredState.stack);
+      }
+
+      const overlay = asRecord(restoredState.overlay);
+      if (overlay) {
+        merged.overlay.enabled = sanitizeBooleanValue(overlay.enabled, merged.overlay.enabled);
+        merged.overlay.mode =
+          typeof overlay.mode === "string" && OVERLAY_MODES.indexOf(overlay.mode) !== -1
+            ? overlay.mode
+            : merged.overlay.mode;
+        merged.overlay.csvName = sanitizeStringValue(overlay.csvName, MAX_TEXT_FIELD_CHARS);
+        merged.overlay.csvText =
+          typeof overlay.csvText === "string"
+            ? overlay.csvText.slice(0, MAX_PERSISTED_OVERLAY_CSV_CHARS)
+            : null;
+        merged.overlay.flagColor = sanitizeHexColor(overlay.flagColor, merged.overlay.flagColor);
+      }
+
+      const comparison = asRecord(restoredState.comparison);
+      if (comparison) {
+        merged.comparison.mode =
+          typeof comparison.mode === "string" && COMPARISON_MODES.indexOf(comparison.mode) !== -1
+            ? comparison.mode
+            : merged.comparison.mode;
+        merged.comparison.secondAudioName = sanitizeStringValue(
+          comparison.secondAudioName,
+          MAX_TEXT_FIELD_CHARS
+        );
+        merged.comparison.offsetSeconds = sanitizeFloat(
+          comparison.offsetSeconds,
+          merged.comparison.offsetSeconds,
+          -30,
+          30
         );
       }
-      if (restoredState.transformParams.mel && typeof restoredState.transformParams.mel === "object") {
-        merged.transformParams.mel = Object.assign(
-          {},
-          merged.transformParams.mel,
-          restoredState.transformParams.mel
+
+      const metrics = asRecord(restoredState.metrics);
+      if (metrics) {
+        merged.metrics.audio = sanitizeBooleanValue(metrics.audio, merged.metrics.audio);
+        merged.metrics.speech = sanitizeBooleanValue(metrics.speech, merged.metrics.speech);
+        merged.metrics.statistical = sanitizeBooleanValue(
+          metrics.statistical,
+          merged.metrics.statistical
+        );
+        merged.metrics.distributional = sanitizeBooleanValue(
+          metrics.distributional,
+          merged.metrics.distributional
+        );
+        merged.metrics.classwise = sanitizeBooleanValue(metrics.classwise, merged.metrics.classwise);
+      }
+
+      const features = asRecord(restoredState.features);
+      if (features) {
+        merged.features.power = sanitizeBooleanValue(features.power, merged.features.power);
+        merged.features.autocorrelation = sanitizeBooleanValue(
+          features.autocorrelation,
+          merged.features.autocorrelation
+        );
+        merged.features.shortTimePower = sanitizeBooleanValue(
+          features.shortTimePower,
+          merged.features.shortTimePower
+        );
+        merged.features.shortTimeAutocorrelation = sanitizeBooleanValue(
+          features.shortTimeAutocorrelation,
+          merged.features.shortTimeAutocorrelation
         );
       }
-      if (restoredState.transformParams.mfcc && typeof restoredState.transformParams.mfcc === "object") {
-        merged.transformParams.mfcc = Object.assign(
-          {},
-          merged.transformParams.mfcc,
-          restoredState.transformParams.mfcc
+
+      const pca = asRecord(restoredState.pca);
+      if (pca) {
+        merged.pca.enabled = sanitizeBooleanValue(pca.enabled, merged.pca.enabled);
+        merged.pca.goal = sanitizePcaGoal(pca.goal, merged.pca.goal);
+        merged.pca.classwise = sanitizeBooleanValue(pca.classwise, merged.pca.classwise);
+      }
+
+      const multichannel = asRecord(restoredState.multichannel);
+      if (multichannel) {
+        merged.multichannel.enabled = sanitizeBooleanValue(
+          multichannel.enabled,
+          merged.multichannel.enabled
+        );
+        merged.multichannel.splitViewsByChannel = sanitizeBooleanValue(
+          multichannel.splitViewsByChannel,
+          merged.multichannel.splitViewsByChannel
         );
       }
-      if (restoredState.transformParams.dct && typeof restoredState.transformParams.dct === "object") {
-        merged.transformParams.dct = Object.assign(
-          {},
-          merged.transformParams.dct,
-          restoredState.transformParams.dct
-        );
+
+      const transformParams = asRecord(restoredState.transformParams);
+      if (transformParams) {
+        const stft = asRecord(transformParams.stft);
+        if (stft) {
+          merged.transformParams.stft = sanitizeStftParams(stft);
+        }
+
+        const mel = asRecord(transformParams.mel);
+        if (mel) {
+          merged.transformParams.mel = sanitizeMelParams(mel, 48000);
+        }
+
+        const mfcc = asRecord(transformParams.mfcc);
+        if (mfcc) {
+          merged.transformParams.mfcc = sanitizeMfccParams(mfcc, 128);
+        }
+
+        const dct = asRecord(transformParams.dct);
+        if (dct) {
+          merged.transformParams.dct = sanitizeDctParams(dct, 256);
+        }
       }
     }
 
-    return merged;
+    return enforceStatePersistenceBounds(merged);
   }
 
   function normalizeLegacyTransformKinds() {
@@ -311,6 +561,10 @@
       return;
     }
 
+    if (state.stack.length > MAX_STACK_ITEMS) {
+      state.stack = state.stack.slice(0, MAX_STACK_ITEMS);
+    }
+
     state.stack.forEach(function (item, index) {
       if (!item || typeof item !== "object") {
         state.stack[index] = {
@@ -321,15 +575,23 @@
         return;
       }
 
-      if (!item.id) {
-        item.id = "view-" + Date.now() + "-" + index;
-      }
+      const kindInfo = sanitizeStackKind(item.kind);
+      item.kind = kindInfo.kind;
 
-      if (!item.kind) {
-        item.kind = "timeseries";
+      if (typeof item.id !== "string" || !item.id.trim()) {
+        item.id = "view-" + Date.now() + "-" + index;
+      } else if (item.id.length > 128) {
+        item.id = item.id.slice(0, 128);
       }
 
       ensureStackItemParams(item);
+
+      if (kindInfo.forceStftMode) {
+        if (!item.params.stft || typeof item.params.stft !== "object") {
+          item.params.stft = {};
+        }
+        item.params.stft.mode = kindInfo.forceStftMode;
+      }
     });
   }
 
@@ -501,7 +763,12 @@
       1,
       600
     );
-    const maxFrames = sanitizeInt(stft.maxFrames, DEFAULT_TRANSFORM_PARAMS.stft.maxFrames, 32, 5000);
+    const maxFrames = sanitizeInt(
+      stft.maxFrames,
+      DEFAULT_TRANSFORM_PARAMS.stft.maxFrames,
+      32,
+      MAX_STFT_FRAMES
+    );
     const hopSize = Math.max(1, Math.round(windowSize * (1 - overlapPercent / 100)));
 
     return {
@@ -858,14 +1125,32 @@
     updatePcaGuidance();
   }
 
+  function createPersistableStateSnapshot() {
+    return mergeBootstrapState(DEFAULT_BOOTSTRAP_STATE, state);
+  }
+
+  function applyPersistableStateSnapshot(snapshot) {
+    state.stack = snapshot.stack;
+    state.overlay = snapshot.overlay;
+    state.comparison = snapshot.comparison;
+    state.metrics = snapshot.metrics;
+    state.features = snapshot.features;
+    state.pca = snapshot.pca;
+    state.multichannel = snapshot.multichannel;
+    state.transformParams = snapshot.transformParams;
+  }
+
   function postState() {
+    const snapshot = createPersistableStateSnapshot();
+    applyPersistableStateSnapshot(snapshot);
+
     if (typeof vscode.setState === "function") {
-      vscode.setState(state);
+      vscode.setState(snapshot);
     }
 
     vscode.postMessage({
       type: "stateChanged",
-      payload: state
+      payload: snapshot
     });
   }
 
@@ -889,6 +1174,25 @@
       return error.message;
     }
     return String(error);
+  }
+
+  function formatBytes(bytes) {
+    const numeric = Number(bytes);
+    if (!Number.isFinite(numeric)) {
+      return "unknown size";
+    }
+    if (numeric <= 0) {
+      return "0 B";
+    }
+    const units = ["B", "KB", "MB", "GB"];
+    let value = numeric;
+    let unitIndex = 0;
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024;
+      unitIndex += 1;
+    }
+    const precision = value >= 100 ? 0 : value >= 10 ? 1 : 2;
+    return value.toFixed(precision) + " " + units[unitIndex];
   }
 
   function splitCsvLine(line) {
@@ -1016,6 +1320,9 @@
     if (headerColumns.length === 0) {
       throw new Error("CSV header is empty.");
     }
+    if (headerColumns.length > MAX_OVERLAY_CSV_COLUMNS) {
+      throw new Error("CSV has too many columns; max is " + MAX_OVERLAY_CSV_COLUMNS + ".");
+    }
 
     const columnIndexByName = Object.create(null);
     headerColumns.forEach(function (name, index) {
@@ -1024,13 +1331,21 @@
       }
     });
 
-    const rows = lines.slice(1).map(function (line, rowIndex) {
-      const values = splitCsvLine(line);
-      return {
+    const rows = [];
+    const bodyLines = lines.slice(1);
+    for (let rowIndex = 0; rowIndex < bodyLines.length; rowIndex += 1) {
+      if (rows.length >= MAX_OVERLAY_CSV_ROWS) {
+        throw new Error("CSV has too many rows; max is " + MAX_OVERLAY_CSV_ROWS + ".");
+      }
+      const values = splitCsvLine(bodyLines[rowIndex]);
+      if (values.length > MAX_OVERLAY_CSV_COLUMNS) {
+        throw new Error("CSV row has too many columns on line " + (rowIndex + 2) + ".");
+      }
+      rows.push({
         lineNumber: rowIndex + 2,
         values
-      };
-    });
+      });
+    }
 
     return {
       columnIndexByName,
@@ -1159,6 +1474,21 @@
     if (!file) {
       overlayParsed = null;
       overlayStatusMessage = "";
+      state.overlay.csvText = null;
+      updateOverlayCsvHint();
+      renderTransformStack();
+      postState();
+      return;
+    }
+
+    if (file.size > MAX_OVERLAY_CSV_INPUT_BYTES) {
+      overlayParsed = null;
+      overlayStatusMessage =
+        "CSV too large: " +
+        formatBytes(file.size) +
+        " (max " +
+        formatBytes(MAX_OVERLAY_CSV_INPUT_BYTES) +
+        ").";
       state.overlay.csvText = null;
       updateOverlayCsvHint();
       renderTransformStack();
@@ -1372,9 +1702,22 @@
       return;
     }
 
-    setAudioStatus("Decoding audio file ...");
-
     const objectUrl = URL.createObjectURL(file);
+    if (file.size > MAX_AUDIO_DECODE_BYTES) {
+      loadPlaybackOnlyAudio(
+        objectUrl,
+        file.name,
+        false,
+        "File too large for in-browser decoding (" +
+          formatBytes(file.size) +
+          ", max " +
+          formatBytes(MAX_AUDIO_DECODE_BYTES) +
+          ")."
+      );
+      return;
+    }
+
+    setAudioStatus("Decoding audio file ...");
 
     try {
       const decoded = await decodeAudioToMono(file);
@@ -1450,8 +1793,20 @@
 
     try {
       const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+      const decodedChannels = Math.max(1, decoded.numberOfChannels);
+      const estimatedDecodedBytes = decoded.length * decodedChannels * 4;
+      if (!Number.isFinite(estimatedDecodedBytes) || estimatedDecodedBytes > MAX_DECODED_PCM_BYTES) {
+        throw new Error(
+          "Decoded audio exceeds safe in-browser limit (" +
+            formatBytes(estimatedDecodedBytes) +
+            ", max " +
+            formatBytes(MAX_DECODED_PCM_BYTES) +
+            ")."
+        );
+      }
+
       const totalSamples = decoded.length;
-      const channelCount = decoded.numberOfChannels;
+      const channelCount = decodedChannels;
       const mono = new Float32Array(totalSamples);
 
       for (let channel = 0; channel < channelCount; channel += 1) {
@@ -1513,6 +1868,24 @@
       return;
     }
 
+    const contentLengthHeader = response.headers.get("content-length");
+    if (contentLengthHeader) {
+      const contentLength = Number(contentLengthHeader);
+      if (Number.isFinite(contentLength) && contentLength > MAX_AUDIO_DECODE_BYTES) {
+        loadPlaybackOnlyAudio(
+          uri,
+          fileName,
+          true,
+          "File too large for in-browser decoding (" +
+            formatBytes(contentLength) +
+            ", max " +
+            formatBytes(MAX_AUDIO_DECODE_BYTES) +
+            ")."
+        );
+        return;
+      }
+    }
+
     let arrayBuffer;
     try {
       arrayBuffer = await response.arrayBuffer();
@@ -1522,6 +1895,20 @@
         fileName,
         true,
         "Read failed; playback-only mode. " + toErrorText(error)
+      );
+      return;
+    }
+
+    if (arrayBuffer.byteLength > MAX_AUDIO_DECODE_BYTES) {
+      loadPlaybackOnlyAudio(
+        uri,
+        fileName,
+        true,
+        "File too large for in-browser decoding (" +
+          formatBytes(arrayBuffer.byteLength) +
+          ", max " +
+          formatBytes(MAX_AUDIO_DECODE_BYTES) +
+          ")."
       );
       return;
     }
@@ -1551,6 +1938,20 @@
     }
 
     setComparisonStatus("Decoding second clip ...");
+
+    if (file.size > MAX_AUDIO_DECODE_BYTES) {
+      comparisonAudioData = null;
+      comparisonDerivedCache = createEmptyDerivedCache();
+      setComparisonStatus(
+        "Second clip too large for in-browser decoding (" +
+          formatBytes(file.size) +
+          ", max " +
+          formatBytes(MAX_AUDIO_DECODE_BYTES) +
+          ")."
+      );
+      renderTransformStack();
+      return;
+    }
 
     try {
       const decoded = await decodeAudioToMono(file);
@@ -1587,6 +1988,21 @@
       return;
     }
 
+    if (file.size > MAX_FILTERBANK_CSV_INPUT_BYTES) {
+      customFilterbank = null;
+      clearDerivedCache();
+      setFilterbankStatus(
+        "CSV too large: " +
+          formatBytes(file.size) +
+          " (max " +
+          formatBytes(MAX_FILTERBANK_CSV_INPUT_BYTES) +
+          ")."
+      );
+      renderTransformStack();
+      postState();
+      return;
+    }
+
     try {
       const csv = await file.text();
       const rows = parseFilterbankCsv(csv);
@@ -1618,6 +2034,9 @@
       }
 
       const values = trimmed.split(",");
+      if (values.length > MAX_FILTERBANK_COLUMNS) {
+        throw new Error("Filterbank row has too many columns (max " + MAX_FILTERBANK_COLUMNS + ").");
+      }
       const numericValues = [];
 
       for (const value of values) {
@@ -1628,6 +2047,9 @@
       }
 
       if (numericValues.length >= 2) {
+        if (rows.length >= MAX_FILTERBANK_ROWS) {
+          throw new Error("Too many filter rows (max " + MAX_FILTERBANK_ROWS + ").");
+        }
         rows.push(Float32Array.from(numericValues));
       }
     }
@@ -3587,10 +4009,18 @@
           onRowParamsChanged();
         }
       );
-      addRowSettingNumber(panel, "Max frames", stftParams.maxFrames, 32, 5000, 1, function (nextValue) {
-        item.params.stft.maxFrames = nextValue;
-        onRowParamsChanged();
-      });
+      addRowSettingNumber(
+        panel,
+        "Max frames",
+        stftParams.maxFrames,
+        32,
+        MAX_STFT_FRAMES,
+        1,
+        function (nextValue) {
+          item.params.stft.maxFrames = nextValue;
+          onRowParamsChanged();
+        }
+      );
     }
 
     if (rowUsesMel(item.kind)) {
@@ -3637,6 +4067,11 @@
 
   function renderStackControls() {
     stackList.innerHTML = "";
+    const atCapacity = state.stack.length >= MAX_STACK_ITEMS;
+    addTransformButton.disabled = atCapacity;
+    addTransformButton.title = atCapacity
+      ? "Maximum of " + MAX_STACK_ITEMS + " views reached."
+      : "Add View";
 
     state.stack.forEach(function (item, index) {
       ensureStackItemParams(item);
@@ -4134,6 +4569,12 @@
   }
 
   addTransformButton.addEventListener("click", function () {
+    if (state.stack.length >= MAX_STACK_ITEMS) {
+      setAudioStatus(
+        "View limit reached (" + MAX_STACK_ITEMS + "). Remove a view before adding another."
+      );
+      return;
+    }
     state.stack.push(nextStackItem());
     renderStackControls();
     renderTransformStack();
@@ -4155,18 +4596,24 @@
   });
 
   window.addEventListener("message", function (event) {
-    const message = event.data;
-    if (!message || typeof message !== "object") {
+    const message = asRecord(event.data);
+    if (!message || typeof message.type !== "string") {
       return;
     }
 
-    if (message.type === "preloadAudio" && message.payload) {
-      const payload = message.payload;
-      if (!payload.uri || !payload.name) {
+    if (message.type === "preloadAudio") {
+      const payload = asRecord(message.payload);
+      if (!payload) {
         return;
       }
 
-      void preloadAudioFromWebviewUri(payload.uri, payload.name).catch(function (error) {
+      const payloadUri = sanitizeWebviewAudioUri(payload.uri);
+      const payloadName = sanitizeStringValue(payload.name, MAX_TEXT_FIELD_CHARS);
+      if (!payloadUri || !payloadName) {
+        return;
+      }
+
+      void preloadAudioFromWebviewUri(payloadUri, payloadName).catch(function (error) {
         setAudioStatus("Failed to preload workspace audio: " + toErrorText(error));
       });
       return;
@@ -4177,8 +4624,18 @@
       return;
     }
 
-    if (message.type === "applyPreset" && message.payload && message.payload.presetId) {
-      applyWorkspacePreset(message.payload.presetId);
+    if (message.type === "applyPreset") {
+      const payload = asRecord(message.payload);
+      if (!payload) {
+        return;
+      }
+
+      const presetId = sanitizeStringValue(payload.presetId, 64);
+      if (!presetId || WORKSPACE_PRESET_IDS.indexOf(presetId) === -1) {
+        return;
+      }
+
+      applyWorkspacePreset(presetId);
     }
   });
 

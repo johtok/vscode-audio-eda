@@ -39,7 +39,10 @@ export class AudioWorkbenchPanel {
       {
         enableScripts: true,
         retainContextWhenHidden: true,
-        localResourceRoots: getWorkbenchLocalResourceRoots(extensionUri)
+        localResourceRoots: getWorkbenchLocalResourceRoots(
+          extensionUri,
+          initialAudioUri ? [initialAudioUri] : []
+        )
       }
     );
 
@@ -110,7 +113,15 @@ export class AudioWorkbenchPanel {
 
   private setPreloadedAudio(uri: vscode.Uri): void {
     this.pendingPreloadUri = uri;
+    this.extendLocalResourceRootsForUri(uri);
     this.trySendPreloadMessage();
+  }
+
+  private extendLocalResourceRootsForUri(uri: vscode.Uri): void {
+    this.panel.webview.options = {
+      ...this.panel.webview.options,
+      localResourceRoots: getWorkbenchLocalResourceRoots(this.extensionUri, [uri])
+    };
   }
 
   private unlockAudioPicker(): void {

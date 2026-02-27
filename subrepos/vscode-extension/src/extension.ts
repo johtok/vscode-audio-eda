@@ -9,6 +9,7 @@ import {
 } from "./sidebar/audioEdaSidebarProvider";
 import { runToolboxJson, ToolboxInvocationError } from "./toolbox/toolboxCli";
 import { AudioWorkbenchPanel } from "./workbench/audioWorkbenchPanel";
+import { createDefaultWorkbenchState } from "./workbench/workbenchState";
 
 const AUDIO_EXTENSIONS = new Set([
   ".wav",
@@ -28,12 +29,392 @@ const WORKBENCH_STATE_KEY = "audioEda.workbenchState";
 const WORKBENCH_STATE_BY_AUDIO_KEY = "audioEda.workbenchStateByAudio";
 const RECENT_WORKSPACES_KEY = "audioEda.recentWorkspaces";
 const MAX_RECENT_WORKSPACES = 5;
+const MAX_PERSISTED_AUDIO_STATES = 20;
+const MAX_PERSISTED_AUDIO_STATES_SCAN = 200;
+const MAX_RECENT_WORKSPACES_SCAN = 200;
+const MAX_WORKBENCH_STATE_BYTES = 1_000_000;
+const MAX_STACK_ITEMS = 24;
+const MAX_STFT_FRAMES = 2000;
+const MAX_OVERLAY_CSV_TEXT_CHARS = 500_000;
+
+const VALID_TRANSFORM_KINDS = new Set([
+  "timeseries",
+  "stft",
+  "mel",
+  "mfcc",
+  "dct",
+  "custom_filterbank"
+]);
+const VALID_OVERLAY_MODES = new Set(["flag", "timestamped"]);
+const VALID_COMPARISON_MODES = new Set([
+  "none",
+  "side_by_side",
+  "overlay",
+  "side_by_side_difference",
+  "stacked",
+  "stacked_difference"
+]);
+const VALID_PCA_GOALS = new Set([
+  "eda",
+  "classification",
+  "denoising",
+  "doa_beamforming",
+  "enhancement"
+]);
+const VALID_STFT_WINDOW_TYPES = new Set(["hann", "hamming", "blackman", "rectangular"]);
+const VALID_STFT_MODES = new Set(["magnitude", "phase"]);
+
+interface PersistedAudioWorkbenchEntry {
+  readonly state: unknown;
+  readonly updatedAt: number;
+}
 
 interface RecentWorkspaceRecord {
   readonly uri: string;
   readonly label: string;
   readonly description?: string;
   readonly timestamp: number;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  return value as Record<string, unknown>;
+}
+
+function sanitizeString(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  return trimmed.length > maxLength ? trimmed.slice(0, maxLength) : trimmed;
+}
+
+function sanitizeNullableString(value: unknown, maxLength: number): string | null {
+  const sanitized = sanitizeString(value, maxLength);
+  return sanitized ?? null;
+}
+
+function sanitizeBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function sanitizeNumber(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number
+): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function sanitizeInteger(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number
+): number {
+  return Math.round(sanitizeNumber(value, fallback, min, max));
+}
+
+function sanitizeEnumValue(
+  value: unknown,
+  validValues: Set<string>,
+  fallback: string
+): string {
+  return typeof value === "string" && validValues.has(value) ? value : fallback;
+}
+
+function sanitizeHexColor(value: unknown, fallback: string): string {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  const trimmed = value.trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+
+  if (/^#[0-9a-fA-F]{3}$/.test(trimmed)) {
+    const r = trimmed.charAt(1);
+    const g = trimmed.charAt(2);
+    const b = trimmed.charAt(3);
+    return `#${r}${r}${g}${g}${b}${b}`.toLowerCase();
+  }
+
+  return fallback;
+}
+
+function safeJsonStringify(value: unknown): string | undefined {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function sanitizeStackItem(rawItem: unknown, index: number): Record<string, unknown> | undefined {
+  const record = asRecord(rawItem);
+  if (!record) {
+    return undefined;
+  }
+
+  const kind = sanitizeEnumValue(record.kind, VALID_TRANSFORM_KINDS, "timeseries");
+  const id = sanitizeString(record.id, 128) ?? `view-${Date.now()}-${index}`;
+  const item: Record<string, unknown> = { id, kind };
+
+  const defaults = createDefaultWorkbenchState().transformParams;
+  const paramsRecord = asRecord(record.params);
+  if (paramsRecord) {
+    const sanitizedParams: Record<string, unknown> = {};
+
+    const stft = asRecord(paramsRecord.stft);
+    if (stft) {
+      sanitizedParams.stft = {
+        mode: sanitizeEnumValue(stft.mode, VALID_STFT_MODES, defaults.stft.mode),
+        windowSize: sanitizeInteger(stft.windowSize, defaults.stft.windowSize, 128, 4096),
+        overlapPercent: sanitizeInteger(stft.overlapPercent, defaults.stft.overlapPercent, 0, 95),
+        windowType: sanitizeEnumValue(stft.windowType, VALID_STFT_WINDOW_TYPES, defaults.stft.windowType),
+        maxAnalysisSeconds: sanitizeInteger(
+          stft.maxAnalysisSeconds,
+          defaults.stft.maxAnalysisSeconds,
+          1,
+          600
+        ),
+        maxFrames: sanitizeInteger(stft.maxFrames, defaults.stft.maxFrames, 32, MAX_STFT_FRAMES)
+      };
+    }
+
+    const mel = asRecord(paramsRecord.mel);
+    if (mel) {
+      sanitizedParams.mel = {
+        bands: sanitizeInteger(mel.bands, defaults.mel.bands, 8, 256),
+        minHz: sanitizeNumber(mel.minHz, defaults.mel.minHz, 0, 24000),
+        maxHz: sanitizeNumber(mel.maxHz, defaults.mel.maxHz, 1, 24000)
+      };
+    }
+
+    const mfcc = asRecord(paramsRecord.mfcc);
+    if (mfcc) {
+      sanitizedParams.mfcc = {
+        coeffs: sanitizeInteger(mfcc.coeffs, defaults.mfcc.coeffs, 2, 128)
+      };
+    }
+
+    const dct = asRecord(paramsRecord.dct);
+    if (dct) {
+      sanitizedParams.dct = {
+        coeffs: sanitizeInteger(dct.coeffs, defaults.dct.coeffs, 2, 256)
+      };
+    }
+
+    if (Object.keys(sanitizedParams).length > 0) {
+      item.params = sanitizedParams;
+    }
+  }
+
+  return item;
+}
+
+function sanitizeTransformParams(rawTransformParams: unknown): Record<string, unknown> {
+  const defaults = createDefaultWorkbenchState().transformParams;
+  const result = JSON.parse(JSON.stringify(defaults)) as typeof defaults;
+  const record = asRecord(rawTransformParams);
+
+  if (!record) {
+    return result as unknown as Record<string, unknown>;
+  }
+
+  const stft = asRecord(record.stft);
+  if (stft) {
+    result.stft.mode = sanitizeEnumValue(stft.mode, VALID_STFT_MODES, result.stft.mode) as
+      | "magnitude"
+      | "phase";
+    result.stft.windowSize = sanitizeInteger(stft.windowSize, result.stft.windowSize, 128, 4096);
+    result.stft.overlapPercent = sanitizeInteger(
+      stft.overlapPercent,
+      result.stft.overlapPercent,
+      0,
+      95
+    );
+    result.stft.windowType = sanitizeEnumValue(
+      stft.windowType,
+      VALID_STFT_WINDOW_TYPES,
+      result.stft.windowType
+    ) as "hann" | "hamming" | "blackman" | "rectangular";
+    result.stft.maxAnalysisSeconds = sanitizeInteger(
+      stft.maxAnalysisSeconds,
+      result.stft.maxAnalysisSeconds,
+      1,
+      600
+    );
+    result.stft.maxFrames = sanitizeInteger(
+      stft.maxFrames,
+      result.stft.maxFrames,
+      32,
+      MAX_STFT_FRAMES
+    );
+  }
+
+  const mel = asRecord(record.mel);
+  if (mel) {
+    result.mel.bands = sanitizeInteger(mel.bands, result.mel.bands, 8, 256);
+    result.mel.minHz = sanitizeNumber(mel.minHz, result.mel.minHz, 0, 24000);
+    result.mel.maxHz = sanitizeNumber(mel.maxHz, result.mel.maxHz, 1, 24000);
+  }
+
+  const mfcc = asRecord(record.mfcc);
+  if (mfcc) {
+    result.mfcc.coeffs = sanitizeInteger(mfcc.coeffs, result.mfcc.coeffs, 2, 128);
+  }
+
+  const dct = asRecord(record.dct);
+  if (dct) {
+    result.dct.coeffs = sanitizeInteger(dct.coeffs, result.dct.coeffs, 2, 256);
+  }
+
+  return result as unknown as Record<string, unknown>;
+}
+
+function sanitizeWorkbenchStatePayload(rawState: unknown): unknown | undefined {
+  const record = asRecord(rawState);
+  if (!record) {
+    return undefined;
+  }
+
+  const defaults = createDefaultWorkbenchState();
+  const sanitized = createDefaultWorkbenchState();
+
+  if (Array.isArray(record.stack)) {
+    const stack = record.stack
+      .slice(0, MAX_STACK_ITEMS)
+      .map((item, index) => sanitizeStackItem(item, index))
+      .filter((item): item is Record<string, unknown> => Boolean(item));
+    if (stack.length > 0) {
+      sanitized.stack = stack as unknown as typeof defaults.stack;
+    }
+  }
+
+  const overlay = asRecord(record.overlay);
+  if (overlay) {
+    sanitized.overlay.enabled = sanitizeBoolean(overlay.enabled, sanitized.overlay.enabled);
+    sanitized.overlay.mode = sanitizeEnumValue(
+      overlay.mode,
+      VALID_OVERLAY_MODES,
+      sanitized.overlay.mode
+    ) as "flag" | "timestamped";
+    sanitized.overlay.csvName = sanitizeNullableString(overlay.csvName, 256);
+    sanitized.overlay.csvText =
+      typeof overlay.csvText === "string"
+        ? overlay.csvText.slice(0, MAX_OVERLAY_CSV_TEXT_CHARS)
+        : null;
+    sanitized.overlay.flagColor = sanitizeHexColor(overlay.flagColor, sanitized.overlay.flagColor);
+  }
+
+  const comparison = asRecord(record.comparison);
+  if (comparison) {
+    sanitized.comparison.mode = sanitizeEnumValue(
+      comparison.mode,
+      VALID_COMPARISON_MODES,
+      sanitized.comparison.mode
+    ) as
+      | "none"
+      | "side_by_side"
+      | "overlay"
+      | "side_by_side_difference"
+      | "stacked"
+      | "stacked_difference";
+    sanitized.comparison.secondAudioName = sanitizeNullableString(comparison.secondAudioName, 256);
+    sanitized.comparison.offsetSeconds = sanitizeNumber(
+      comparison.offsetSeconds,
+      sanitized.comparison.offsetSeconds,
+      -30,
+      30
+    );
+  }
+
+  const metrics = asRecord(record.metrics);
+  if (metrics) {
+    sanitized.metrics.audio = sanitizeBoolean(metrics.audio, sanitized.metrics.audio);
+    sanitized.metrics.speech = sanitizeBoolean(metrics.speech, sanitized.metrics.speech);
+    sanitized.metrics.statistical = sanitizeBoolean(
+      metrics.statistical,
+      sanitized.metrics.statistical
+    );
+    sanitized.metrics.distributional = sanitizeBoolean(
+      metrics.distributional,
+      sanitized.metrics.distributional
+    );
+    sanitized.metrics.classwise = sanitizeBoolean(metrics.classwise, sanitized.metrics.classwise);
+  }
+
+  const features = asRecord(record.features);
+  if (features) {
+    sanitized.features.power = sanitizeBoolean(features.power, sanitized.features.power);
+    sanitized.features.autocorrelation = sanitizeBoolean(
+      features.autocorrelation,
+      sanitized.features.autocorrelation
+    );
+    sanitized.features.shortTimePower = sanitizeBoolean(
+      features.shortTimePower,
+      sanitized.features.shortTimePower
+    );
+    sanitized.features.shortTimeAutocorrelation = sanitizeBoolean(
+      features.shortTimeAutocorrelation,
+      sanitized.features.shortTimeAutocorrelation
+    );
+  }
+
+  const pca = asRecord(record.pca);
+  if (pca) {
+    sanitized.pca.enabled = sanitizeBoolean(pca.enabled, sanitized.pca.enabled);
+    sanitized.pca.goal = sanitizeEnumValue(pca.goal, VALID_PCA_GOALS, sanitized.pca.goal) as
+      | "eda"
+      | "classification"
+      | "denoising"
+      | "doa_beamforming"
+      | "enhancement";
+    sanitized.pca.classwise = sanitizeBoolean(pca.classwise, sanitized.pca.classwise);
+  }
+
+  const multichannel = asRecord(record.multichannel);
+  if (multichannel) {
+    sanitized.multichannel.enabled = sanitizeBoolean(
+      multichannel.enabled,
+      sanitized.multichannel.enabled
+    );
+    sanitized.multichannel.splitViewsByChannel = sanitizeBoolean(
+      multichannel.splitViewsByChannel,
+      sanitized.multichannel.splitViewsByChannel
+    );
+  }
+
+  sanitized.transformParams = sanitizeTransformParams(
+    record.transformParams
+  ) as typeof sanitized.transformParams;
+
+  const serialized = safeJsonStringify(sanitized);
+  if (!serialized) {
+    return undefined;
+  }
+
+  if (Buffer.byteLength(serialized, "utf8") > MAX_WORKBENCH_STATE_BYTES) {
+    return undefined;
+  }
+
+  return JSON.parse(serialized) as unknown;
 }
 
 function logJson(channel: vscode.OutputChannel, heading: string, payload: unknown): void {
@@ -49,16 +430,70 @@ function getConfig(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration("audioEda");
 }
 
-function sanitizeStateMap(raw: unknown): Record<string, unknown> {
+function sanitizePersistedAudioStateMap(
+  raw: unknown
+): Record<string, PersistedAudioWorkbenchEntry> {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return {};
   }
 
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    out[String(key)] = value;
+  const map = raw as Record<string, unknown>;
+  const entries: Array<[string, PersistedAudioWorkbenchEntry]> = [];
+  let scanned = 0;
+
+  for (const uri in map) {
+    if (!Object.prototype.hasOwnProperty.call(map, uri)) {
+      continue;
+    }
+    scanned += 1;
+    if (scanned > MAX_PERSISTED_AUDIO_STATES_SCAN) {
+      break;
+    }
+    if (!uri.trim()) {
+      continue;
+    }
+    const value = map[uri];
+    let parsedUri: vscode.Uri;
+    try {
+      parsedUri = vscode.Uri.parse(uri, true);
+    } catch {
+      continue;
+    }
+    if (!isAudioUri(parsedUri)) {
+      continue;
+    }
+
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const candidate = value as Partial<PersistedAudioWorkbenchEntry>;
+      if ("state" in candidate) {
+        const sanitizedState = sanitizeWorkbenchStatePayload(candidate.state);
+        if (!sanitizedState) {
+          continue;
+        }
+        const updatedAt = Number.isFinite(Number(candidate.updatedAt))
+          ? Number(candidate.updatedAt)
+          : 0;
+        entries.push([uri, { state: sanitizedState, updatedAt }]);
+        continue;
+      }
+    }
+
+    const sanitizedState = sanitizeWorkbenchStatePayload(value);
+    if (!sanitizedState) {
+      continue;
+    }
+    entries.push([uri, { state: sanitizedState, updatedAt: 0 }]);
   }
-  return out;
+
+  entries.sort((left, right) => right[1].updatedAt - left[1].updatedAt);
+  return Object.fromEntries(entries.slice(0, MAX_PERSISTED_AUDIO_STATES));
+}
+
+function prunePersistedAudioStateMap(
+  map: Record<string, PersistedAudioWorkbenchEntry>
+): Record<string, PersistedAudioWorkbenchEntry> {
+  const entries = Object.entries(map).sort((left, right) => right[1].updatedAt - left[1].updatedAt);
+  return Object.fromEntries(entries.slice(0, MAX_PERSISTED_AUDIO_STATES));
 }
 
 function sanitizeRecentWorkspaceRecords(raw: unknown): RecentWorkspaceRecord[] {
@@ -67,7 +502,7 @@ function sanitizeRecentWorkspaceRecords(raw: unknown): RecentWorkspaceRecord[] {
   }
 
   const deduped = new Map<string, RecentWorkspaceRecord>();
-  for (const item of raw) {
+  for (const item of raw.slice(0, MAX_RECENT_WORKSPACES_SCAN)) {
     if (!item || typeof item !== "object") {
       continue;
     }
@@ -78,12 +513,17 @@ function sanitizeRecentWorkspaceRecords(raw: unknown): RecentWorkspaceRecord[] {
     }
 
     const uri = record.uri.trim();
-    let fallbackLabel = "audio";
+    let parsedUri: vscode.Uri;
     try {
-      fallbackLabel = path.basename(vscode.Uri.parse(uri).path) || fallbackLabel;
+      parsedUri = vscode.Uri.parse(uri, true);
     } catch {
-      fallbackLabel = "audio";
+      continue;
     }
+    if (!isAudioUri(parsedUri)) {
+      continue;
+    }
+    let fallbackLabel = "audio";
+    fallbackLabel = path.basename(parsedUri.path) || fallbackLabel;
     const label =
       typeof record.label === "string" && record.label.trim()
         ? record.label.trim()
@@ -218,8 +658,10 @@ export function activate(context: vscode.ExtensionContext): void {
   const sidebarProvider = new AudioEdaSidebarProvider();
   const reopenGuard = new Set<string>();
 
-  const loadStateMap = (): Record<string, unknown> =>
-    sanitizeStateMap(context.workspaceState.get<unknown>(WORKBENCH_STATE_BY_AUDIO_KEY));
+  const loadStateMap = (): Record<string, PersistedAudioWorkbenchEntry> =>
+    sanitizePersistedAudioStateMap(
+      context.workspaceState.get<unknown>(WORKBENCH_STATE_BY_AUDIO_KEY)
+    );
 
   const loadRecentWorkspaceRecords = (): RecentWorkspaceRecord[] =>
     sanitizeRecentWorkspaceRecords(context.workspaceState.get<unknown>(RECENT_WORKSPACES_KEY));
@@ -244,23 +686,53 @@ export function activate(context: vscode.ExtensionContext): void {
     publishRecentWorkspaces(merged);
   };
 
+  const sanitizeIncomingState = (
+    state: unknown,
+    source: "workbench-panel" | "custom-editor"
+  ): unknown | undefined => {
+    const sanitized = sanitizeWorkbenchStatePayload(state);
+    if (!sanitized) {
+      output.appendLine(
+        `[security] Rejected invalid or oversized state payload from ${source}.`
+      );
+    }
+    return sanitized;
+  };
+
   const workbenchStatePersistence = {
-    load: (): unknown | undefined => context.workspaceState.get(WORKBENCH_STATE_KEY),
-    save: (state: unknown): Thenable<void> =>
-      context.workspaceState.update(WORKBENCH_STATE_KEY, state)
+    load: (): unknown | undefined =>
+      sanitizeWorkbenchStatePayload(context.workspaceState.get(WORKBENCH_STATE_KEY)),
+    save: async (state: unknown): Promise<void> => {
+      const sanitized = sanitizeIncomingState(state, "workbench-panel");
+      if (!sanitized) {
+        return;
+      }
+      await context.workspaceState.update(WORKBENCH_STATE_KEY, sanitized);
+    }
   };
 
   const customEditorStatePersistence = {
     loadForUri: (uri: vscode.Uri): unknown | undefined => {
       const stateByAudio = loadStateMap();
       const key = uri.toString();
-      return stateByAudio[key] ?? context.workspaceState.get(WORKBENCH_STATE_KEY);
+      const stateFromUri = stateByAudio[key]?.state;
+      if (stateFromUri) {
+        return stateFromUri;
+      }
+      return sanitizeWorkbenchStatePayload(context.workspaceState.get(WORKBENCH_STATE_KEY));
     },
     saveForUri: async (uri: vscode.Uri, state: unknown): Promise<void> => {
+      const sanitized = sanitizeIncomingState(state, "custom-editor");
+      if (!sanitized) {
+        return;
+      }
       const stateByAudio = loadStateMap();
-      stateByAudio[uri.toString()] = state;
-      await context.workspaceState.update(WORKBENCH_STATE_BY_AUDIO_KEY, stateByAudio);
-      await context.workspaceState.update(WORKBENCH_STATE_KEY, state);
+      stateByAudio[uri.toString()] = { state: sanitized, updatedAt: Date.now() };
+      await context.workspaceState.update(
+        WORKBENCH_STATE_BY_AUDIO_KEY,
+        prunePersistedAudioStateMap(stateByAudio)
+      );
+      await context.workspaceState.update(WORKBENCH_STATE_KEY, sanitized);
       await noteRecentWorkspace(uri);
     },
     noteRecentWorkspace

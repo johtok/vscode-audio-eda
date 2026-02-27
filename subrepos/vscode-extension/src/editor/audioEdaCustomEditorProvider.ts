@@ -1,5 +1,4 @@
 import * as vscode from "vscode";
-import * as path from "path";
 import { buildWorkbenchHtml, getWorkbenchLocalResourceRoots } from "../workbench/workbenchHtml";
 
 interface AudioEdaDocument extends vscode.CustomDocument {
@@ -41,14 +40,9 @@ export class AudioEdaCustomEditorProvider
   ): Promise<void> {
     void this.statePersistence?.noteRecentWorkspace?.(document.uri);
 
-    const localRoots = getWorkbenchLocalResourceRoots(this.extensionUri);
-    const documentFolder =
-      document.uri.scheme === "file" ? vscode.Uri.file(path.dirname(document.uri.fsPath)) : undefined;
-    const mergedRoots = documentFolder ? [...localRoots, documentFolder] : localRoots;
-
     webviewPanel.webview.options = {
       enableScripts: true,
-      localResourceRoots: mergedRoots
+      localResourceRoots: getWorkbenchLocalResourceRoots(this.extensionUri, [document.uri])
     };
 
     let ready = false;
