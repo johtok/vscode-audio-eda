@@ -54,6 +54,13 @@
   const METRICS_HOP_SIZE_SECONDS = 0.01;
   const METRICS_SPEECH_SILENCE_DB_OFFSET = 35;
   const METRICS_SPEECH_ACTIVITY_DB_OFFSET = 20;
+  const METRICS_TRUE_PEAK_OVERSAMPLE = 4;
+  const METRICS_MAX_PITCH_FRAMES = 800;
+  const METRICS_MIN_PITCH_HZ = 50;
+  const METRICS_MAX_PITCH_HZ = 400;
+  const METRICS_CHANGEPOINT_DB = 6;
+  const METRICS_ONSET_MIN_SPACING_SECONDS = 0.05;
+  const METRICS_FRAME_SCAN_LIMIT = 6000;
   const METRICS_EXPORT_MAX_ROWS = 200000;
   const DEFAULT_TRANSFORM_PARAMS = {
     stft: {
@@ -1280,7 +1287,7 @@
       1,
       Math.floor((Math.max(samples.length, frameSize) - frameSize) / hopSize) + 1
     );
-    const frameStride = Math.max(1, Math.floor(totalFrames / 6000));
+    const frameStride = Math.max(1, Math.floor(totalFrames / METRICS_FRAME_SCAN_LIMIT));
     const energyByFrame = [];
     const zcrByFrame = [];
 
@@ -1409,6 +1416,726 @@
     };
   }
 
+  function meanOfNumbers(values) {
+    if (!values || values.length === 0) {
+      return 0;
+    }
+    let sum = 0;
+    for (let index = 0; index < values.length; index += 1) {
+      sum += values[index];
+    }
+    return sum / values.length;
+  }
+
+  function stdOfNumbers(values, meanValue) {
+    if (!values || values.length === 0) {
+      return 0;
+    }
+    const mean = Number.isFinite(meanValue) ? meanValue : meanOfNumbers(values);
+    let sumSquares = 0;
+    for (let index = 0; index < values.length; index += 1) {
+      const centered = values[index] - mean;
+      sumSquares += centered * centered;
+    }
+    return Math.sqrt(sumSquares / values.length);
+  }
+
+  function truePeakLinear(samples, oversampleFactor) {
+    if (!samples || samples.length === 0) {
+      return 0;
+    }
+
+    const factor = Math.max(1, Math.round(oversampleFactor));
+    let peak = Math.abs(samples[0]);
+    for (let index = 0; index < samples.length - 1; index += 1) {
+      const left = samples[index];
+      const right = samples[index + 1];
+      const leftAbs = Math.abs(left);
+      if (leftAbs > peak) {
+        peak = leftAbs;
+      }
+
+      for (let step = 1; step < factor; step += 1) {
+        const alpha = step / factor;
+        const interpolated = left + (right - left) * alpha;
+        const absolute = Math.abs(interpolated);
+        if (absolute > peak) {
+          peak = absolute;
+        }
+      }
+    }
+
+    const tail = Math.abs(samples[samples.length - 1]);
+    return tail > peak ? tail : peak;
+  }
+
+  function detectOnsetsFromFrameEnergy(frameEnergyDb, hopSeconds) {
+    if (!frameEnergyDb || frameEnergyDb.length < 3 || hopSeconds <= 0) {
+      return {
+        onsetCount: 0,
+        onsetRateHz: 0,
+        interOnsetMeanSeconds: 0,
+        interOnsetMedianSeconds: 0,
+        interOnsetCv: 0,
+        fluxThreshold: 0
+      };
+    }
+
+    const flux = [];
+    for (let index = 1; index < frameEnergyDb.length; index += 1) {
+      const delta = frameEnergyDb[index] - frameEnergyDb[index - 1];
+      flux.push(Math.max(0, delta));
+    }
+
+    const sortedFlux = flux.slice().sort(function (a, b) {
+      return a - b;
+    });
+    const fluxMedian = quantileSorted(sortedFlux, 0.5);
+    const fluxIqr = quantileSorted(sortedFlux, 0.75) - quantileSorted(sortedFlux, 0.25);
+    const fluxThreshold = Math.max(0.1, fluxMedian + 1.5 * fluxIqr);
+    const minSpacingFrames = Math.max(1, Math.round(METRICS_ONSET_MIN_SPACING_SECONDS / hopSeconds));
+
+    const onsetFrames = [];
+    let lastOnsetFrame = Number.NEGATIVE_INFINITY;
+    for (let index = 1; index < flux.length - 1; index += 1) {
+      const localPeak = flux[index] >= flux[index - 1] && flux[index] >= flux[index + 1];
+      if (!localPeak || flux[index] < fluxThreshold) {
+        continue;
+      }
+      if (index - lastOnsetFrame < minSpacingFrames) {
+        continue;
+      }
+      onsetFrames.push(index + 1);
+      lastOnsetFrame = index;
+    }
+
+    const intervals = [];
+    for (let index = 1; index < onsetFrames.length; index += 1) {
+      intervals.push((onsetFrames[index] - onsetFrames[index - 1]) * hopSeconds);
+    }
+    const sortedIntervals = intervals.slice().sort(function (a, b) {
+      return a - b;
+    });
+    const duration = frameEnergyDb.length * hopSeconds;
+    const onsetRateHz = duration > 0 ? onsetFrames.length / duration : 0;
+    const interOnsetMeanSeconds = meanOfNumbers(intervals);
+    const interOnsetMedianSeconds = quantileSorted(sortedIntervals, 0.5);
+    const interOnsetCv =
+      interOnsetMeanSeconds > 0 ? stdOfNumbers(intervals, interOnsetMeanSeconds) / interOnsetMeanSeconds : 0;
+
+    return {
+      onsetCount: onsetFrames.length,
+      onsetRateHz,
+      interOnsetMeanSeconds,
+      interOnsetMedianSeconds,
+      interOnsetCv,
+      fluxThreshold
+    };
+  }
+
+  function summarizeSlopeDistribution(frameEnergyDb, hopSeconds) {
+    if (!frameEnergyDb || frameEnergyDb.length < 2 || hopSeconds <= 0) {
+      return {
+        attackMedianDbPerSecond: 0,
+        attackP95DbPerSecond: 0,
+        decayMedianDbPerSecond: 0,
+        decayP95DbPerSecond: 0
+      };
+    }
+
+    const attack = [];
+    const decay = [];
+    for (let index = 1; index < frameEnergyDb.length; index += 1) {
+      const slope = (frameEnergyDb[index] - frameEnergyDb[index - 1]) / hopSeconds;
+      if (slope > 0) {
+        attack.push(slope);
+      } else if (slope < 0) {
+        decay.push(-slope);
+      }
+    }
+
+    const sortedAttack = attack.slice().sort(function (a, b) {
+      return a - b;
+    });
+    const sortedDecay = decay.slice().sort(function (a, b) {
+      return a - b;
+    });
+
+    return {
+      attackMedianDbPerSecond: quantileSorted(sortedAttack, 0.5),
+      attackP95DbPerSecond: quantileSorted(sortedAttack, 0.95),
+      decayMedianDbPerSecond: quantileSorted(sortedDecay, 0.5),
+      decayP95DbPerSecond: quantileSorted(sortedDecay, 0.95)
+    };
+  }
+
+  function estimateCorrelationTime(samples, sampleRate) {
+    if (!samples || samples.length < 4 || sampleRate <= 0) {
+      return 0;
+    }
+
+    const maxScan = Math.min(samples.length, 8192);
+    let zeroLag = 0;
+    for (let index = 0; index < maxScan; index += 1) {
+      const value = samples[index];
+      zeroLag += value * value;
+    }
+    if (zeroLag <= 1e-12) {
+      return 0;
+    }
+
+    const target = Math.exp(-1);
+    const maxLag = Math.min(maxScan - 1, Math.max(16, Math.floor(sampleRate * 0.1)));
+    for (let lag = 1; lag <= maxLag; lag += 1) {
+      let sum = 0;
+      for (let index = 0; index + lag < maxScan; index += 1) {
+        sum += samples[index] * samples[index + lag];
+      }
+      const normalized = sum / zeroLag;
+      if (normalized <= target) {
+        return lag / sampleRate;
+      }
+    }
+
+    return maxLag / sampleRate;
+  }
+
+  function estimatePitchStats(samples, sampleRate, frameSize, hopSize, frameEnergyDb, activeThresholdDb) {
+    if (!samples || samples.length < frameSize || sampleRate <= 0) {
+      return {
+        analyzedFrames: 0,
+        voicedFrames: 0,
+        voicedRatio: 0,
+        f0MeanHz: 0,
+        f0StdHz: 0,
+        f0MinHz: 0,
+        f0MaxHz: 0,
+        f0MedianHz: 0,
+        jitterLocal: 0,
+        shimmerLocal: 0
+      };
+    }
+
+    const lagMin = Math.max(1, Math.floor(sampleRate / METRICS_MAX_PITCH_HZ));
+    const lagMax = Math.max(lagMin + 1, Math.floor(sampleRate / METRICS_MIN_PITCH_HZ));
+    const totalFrames = Math.max(1, Math.floor((samples.length - frameSize) / hopSize) + 1);
+    const frameStride = Math.max(1, Math.floor(totalFrames / METRICS_MAX_PITCH_FRAMES));
+
+    const f0Values = [];
+    const periods = [];
+    const amplitudes = [];
+    let analyzedFrames = 0;
+    let voicedFrames = 0;
+
+    for (let frame = 0; frame < totalFrames; frame += frameStride) {
+      const energyDb = frame < frameEnergyDb.length ? frameEnergyDb[frame] : -120;
+      if (energyDb < activeThresholdDb) {
+        continue;
+      }
+
+      const offset = frame * hopSize;
+      if (offset + frameSize > samples.length) {
+        break;
+      }
+
+      analyzedFrames += 1;
+      let zeroLag = 0;
+      let frameRmsAccum = 0;
+      for (let index = 0; index < frameSize; index += 1) {
+        const value = samples[offset + index];
+        zeroLag += value * value;
+        frameRmsAccum += value * value;
+      }
+      if (zeroLag <= 1e-12) {
+        continue;
+      }
+
+      let bestLag = 0;
+      let bestCorrelation = Number.NEGATIVE_INFINITY;
+      for (let lag = lagMin; lag <= lagMax; lag += 1) {
+        let sum = 0;
+        for (let index = 0; index + lag < frameSize; index += 1) {
+          sum += samples[offset + index] * samples[offset + index + lag];
+        }
+        const normalized = sum / zeroLag;
+        if (normalized > bestCorrelation) {
+          bestCorrelation = normalized;
+          bestLag = lag;
+        }
+      }
+
+      if (bestLag <= 0 || bestCorrelation < 0.3) {
+        continue;
+      }
+
+      const f0 = sampleRate / bestLag;
+      if (!Number.isFinite(f0) || f0 < METRICS_MIN_PITCH_HZ || f0 > METRICS_MAX_PITCH_HZ) {
+        continue;
+      }
+
+      voicedFrames += 1;
+      f0Values.push(f0);
+      periods.push(bestLag / sampleRate);
+      amplitudes.push(Math.sqrt(frameRmsAccum / frameSize));
+    }
+
+    const sortedF0 = f0Values.slice().sort(function (a, b) {
+      return a - b;
+    });
+    let jitterNumerator = 0;
+    for (let index = 1; index < periods.length; index += 1) {
+      jitterNumerator += Math.abs(periods[index] - periods[index - 1]);
+    }
+    const meanPeriod = meanOfNumbers(periods);
+    const jitterLocal =
+      periods.length > 1 && meanPeriod > 1e-12
+        ? (jitterNumerator / (periods.length - 1)) / meanPeriod
+        : 0;
+
+    let shimmerNumerator = 0;
+    for (let index = 1; index < amplitudes.length; index += 1) {
+      shimmerNumerator += Math.abs(amplitudes[index] - amplitudes[index - 1]);
+    }
+    const meanAmplitude = meanOfNumbers(amplitudes);
+    const shimmerLocal =
+      amplitudes.length > 1 && meanAmplitude > 1e-12
+        ? (shimmerNumerator / (amplitudes.length - 1)) / meanAmplitude
+        : 0;
+
+    return {
+      analyzedFrames,
+      voicedFrames,
+      voicedRatio: analyzedFrames > 0 ? voicedFrames / analyzedFrames : 0,
+      f0MeanHz: meanOfNumbers(f0Values),
+      f0StdHz: stdOfNumbers(f0Values),
+      f0MinHz: sortedF0.length ? sortedF0[0] : 0,
+      f0MaxHz: sortedF0.length ? sortedF0[sortedF0.length - 1] : 0,
+      f0MedianHz: quantileSorted(sortedF0, 0.5),
+      jitterLocal,
+      shimmerLocal
+    };
+  }
+
+  function summarizeBandPower(avgPsd, sampleRate, fftSize) {
+    const nyquist = sampleRate / 2;
+    const ranges = [
+      { key: "low20_250", minHz: 20, maxHz: Math.min(250, nyquist) },
+      { key: "mid250_2k", minHz: 250, maxHz: Math.min(2000, nyquist) },
+      { key: "high2k_8k", minHz: 2000, maxHz: Math.min(8000, nyquist) },
+      { key: "air8k_nyq", minHz: 8000, maxHz: nyquist }
+    ];
+
+    const totals = Object.create(null);
+    ranges.forEach(function (range) {
+      totals[range.key] = 0;
+    });
+
+    let total = 0;
+    for (let bin = 0; bin < avgPsd.length; bin += 1) {
+      const frequency = (bin * sampleRate) / fftSize;
+      const power = avgPsd[bin];
+      total += power;
+      for (let rangeIndex = 0; rangeIndex < ranges.length; rangeIndex += 1) {
+        const range = ranges[rangeIndex];
+        if (frequency >= range.minHz && frequency < range.maxHz) {
+          totals[range.key] += power;
+          break;
+        }
+      }
+    }
+
+    const out = {};
+    ranges.forEach(function (range) {
+      const value = totals[range.key];
+      out[range.key] = {
+        power: value,
+        ratio: total > 0 ? value / total : 0,
+        db: 10 * Math.log10(value + 1e-12)
+      };
+    });
+    out.total = total;
+    return out;
+  }
+
+  function summarizeSpectralFeatures(stft) {
+    if (!stft || !stft.powerFrames || stft.powerFrames.length === 0) {
+      return null;
+    }
+
+    const eps = 1e-12;
+    const binCount = stft.binCount;
+    const frameCount = stft.powerFrames.length;
+    const frequencies = new Float64Array(binCount);
+    for (let bin = 0; bin < binCount; bin += 1) {
+      frequencies[bin] = (bin * stft.sampleRate) / stft.fftSize;
+    }
+
+    const avgPsd = new Float64Array(binCount);
+    const centroidValues = [];
+    const spreadValues = [];
+    const skewnessValues = [];
+    const kurtosisValues = [];
+    const flatnessValues = [];
+    const entropyValues = [];
+    const rolloffValues = [];
+
+    for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+      const frame = stft.powerFrames[frameIndex];
+      let sumPower = 0;
+      for (let bin = 0; bin < binCount; bin += 1) {
+        const value = frame[bin];
+        avgPsd[bin] += value;
+        sumPower += value;
+      }
+      if (sumPower <= eps) {
+        continue;
+      }
+
+      let centroidNumerator = 0;
+      let geometricLogSum = 0;
+      let entropy = 0;
+      for (let bin = 0; bin < binCount; bin += 1) {
+        const power = frame[bin] + eps;
+        const probability = power / sumPower;
+        centroidNumerator += frequencies[bin] * power;
+        geometricLogSum += Math.log(power);
+        entropy -= probability * Math.log2(probability);
+      }
+
+      const centroid = centroidNumerator / (sumPower + eps);
+      let spreadAccum = 0;
+      let skewAccum = 0;
+      let kurtAccum = 0;
+      let cumulative = 0;
+      let rolloffHz = frequencies[frequencies.length - 1];
+
+      for (let bin = 0; bin < binCount; bin += 1) {
+        const power = frame[bin] + eps;
+        const centered = frequencies[bin] - centroid;
+        spreadAccum += centered * centered * power;
+        cumulative += power;
+        if (cumulative >= 0.85 * sumPower) {
+          rolloffHz = frequencies[bin];
+          break;
+        }
+      }
+
+      const spread = Math.sqrt(spreadAccum / (sumPower + eps));
+      if (spread > eps) {
+        for (let bin = 0; bin < binCount; bin += 1) {
+          const power = frame[bin] + eps;
+          const z = (frequencies[bin] - centroid) / spread;
+          skewAccum += z * z * z * power;
+          kurtAccum += z * z * z * z * power;
+        }
+        skewnessValues.push(skewAccum / (sumPower + eps));
+        kurtosisValues.push(kurtAccum / (sumPower + eps) - 3);
+      }
+
+      centroidValues.push(centroid);
+      spreadValues.push(spread);
+      flatnessValues.push(Math.exp(geometricLogSum / binCount) / (sumPower / binCount + eps));
+      entropyValues.push(entropy / Math.log2(binCount));
+      rolloffValues.push(rolloffHz);
+    }
+
+    for (let bin = 0; bin < avgPsd.length; bin += 1) {
+      avgPsd[bin] /= Math.max(1, frameCount);
+    }
+
+    let dominantBin = 0;
+    for (let bin = 1; bin < avgPsd.length; bin += 1) {
+      if (avgPsd[bin] > avgPsd[dominantBin]) {
+        dominantBin = bin;
+      }
+    }
+
+    let xMean = 0;
+    let yMean = 0;
+    let regressionCount = 0;
+    for (let bin = 1; bin < avgPsd.length; bin += 1) {
+      const frequency = frequencies[bin];
+      if (frequency <= 0) {
+        continue;
+      }
+      const x = Math.log10(frequency);
+      const y = 10 * Math.log10(avgPsd[bin] + eps);
+      xMean += x;
+      yMean += y;
+      regressionCount += 1;
+    }
+    xMean /= Math.max(1, regressionCount);
+    yMean /= Math.max(1, regressionCount);
+
+    let covariance = 0;
+    let varianceX = 0;
+    for (let bin = 1; bin < avgPsd.length; bin += 1) {
+      const frequency = frequencies[bin];
+      if (frequency <= 0) {
+        continue;
+      }
+      const x = Math.log10(frequency);
+      const y = 10 * Math.log10(avgPsd[bin] + eps);
+      covariance += (x - xMean) * (y - yMean);
+      varianceX += (x - xMean) * (x - xMean);
+    }
+    const spectralSlopeDbPerDecade = varianceX > eps ? covariance / varianceX : 0;
+    const bandPower = summarizeBandPower(avgPsd, stft.sampleRate, stft.fftSize);
+
+    return {
+      frameCount,
+      dominantFrequencyHz: frequencies[dominantBin],
+      spectralSlopeDbPerDecade,
+      centroidMeanHz: meanOfNumbers(centroidValues),
+      centroidStdHz: stdOfNumbers(centroidValues),
+      spreadMeanHz: meanOfNumbers(spreadValues),
+      spreadStdHz: stdOfNumbers(spreadValues),
+      skewnessMean: meanOfNumbers(skewnessValues),
+      kurtosisExcessMean: meanOfNumbers(kurtosisValues),
+      flatnessMean: meanOfNumbers(flatnessValues),
+      entropyMean: meanOfNumbers(entropyValues),
+      rolloff85MeanHz: meanOfNumbers(rolloffValues),
+      tonalityProxy: Math.max(0, 1 - meanOfNumbers(flatnessValues)),
+      bandPower
+    };
+  }
+
+  function summarizeMelMfccFeatures(stft) {
+    if (!stft || !stft.powerFrames || stft.powerFrames.length === 0) {
+      return null;
+    }
+
+    const melBands = 40;
+    const minHz = 0;
+    const maxHz = Math.min(8000, stft.sampleRate / 2);
+    const melFilterbank = createMelFilterbank(stft.sampleRate, stft.fftSize, melBands, minHz, maxHz);
+    const melPower = applyFilterbank(stft.powerFrames, melFilterbank);
+    if (!melPower.length) {
+      return null;
+    }
+
+    const frameCount = melPower.length;
+    const melLog = new Array(frameCount);
+    let globalSum = 0;
+    let globalCount = 0;
+    for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+      const source = melPower[frameIndex];
+      const row = new Float32Array(source.length);
+      for (let band = 0; band < source.length; band += 1) {
+        const value = 10 * Math.log10(source[band] + 1e-12);
+        row[band] = value;
+        globalSum += value;
+        globalCount += 1;
+      }
+      melLog[frameIndex] = row;
+    }
+    const globalMean = globalCount > 0 ? globalSum / globalCount : 0;
+    let globalVar = 0;
+    for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+      const row = melLog[frameIndex];
+      for (let band = 0; band < row.length; band += 1) {
+        const centered = row[band] - globalMean;
+        globalVar += centered * centered;
+      }
+    }
+    globalVar /= Math.max(1, globalCount);
+
+    const bandMeans = new Array(melBands).fill(0);
+    for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+      const row = melLog[frameIndex];
+      for (let band = 0; band < melBands; band += 1) {
+        bandMeans[band] += row[band];
+      }
+    }
+    for (let band = 0; band < melBands; band += 1) {
+      bandMeans[band] /= Math.max(1, frameCount);
+    }
+
+    const bandStd = new Array(melBands).fill(0);
+    for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+      const row = melLog[frameIndex];
+      for (let band = 0; band < melBands; band += 1) {
+        const centered = row[band] - bandMeans[band];
+        bandStd[band] += centered * centered;
+      }
+    }
+    for (let band = 0; band < melBands; band += 1) {
+      bandStd[band] = Math.sqrt(bandStd[band] / Math.max(1, frameCount));
+    }
+
+    const sortedBandMeans = bandMeans.slice().sort(function (a, b) {
+      return a - b;
+    });
+    let adjacentCorrelationSum = 0;
+    let adjacentCorrelationCount = 0;
+    for (let band = 0; band < melBands - 1; band += 1) {
+      const stdLeft = bandStd[band];
+      const stdRight = bandStd[band + 1];
+      if (stdLeft <= 1e-12 || stdRight <= 1e-12) {
+        continue;
+      }
+      let covariance = 0;
+      for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+        covariance +=
+          (melLog[frameIndex][band] - bandMeans[band]) *
+          (melLog[frameIndex][band + 1] - bandMeans[band + 1]);
+      }
+      covariance /= Math.max(1, frameCount);
+      adjacentCorrelationSum += covariance / (stdLeft * stdRight);
+      adjacentCorrelationCount += 1;
+    }
+
+    const frameMelMean = new Array(frameCount).fill(0);
+    for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+      frameMelMean[frameIndex] = meanOfNumbers(melLog[frameIndex]);
+    }
+    const delta = [];
+    for (let index = 1; index < frameMelMean.length; index += 1) {
+      delta.push(frameMelMean[index] - frameMelMean[index - 1]);
+    }
+    const delta2 = [];
+    for (let index = 1; index < delta.length; index += 1) {
+      delta2.push(delta[index] - delta[index - 1]);
+    }
+    const deltaRms = Math.sqrt(meanOfNumbers(delta.map(function (value) {
+      return value * value;
+    })));
+    const delta2Rms = Math.sqrt(meanOfNumbers(delta2.map(function (value) {
+      return value * value;
+    })));
+
+    const mfccMatrix = dctRows(melLog, 13);
+    const coeffCount = mfccMatrix.length > 0 ? mfccMatrix[0].length : 0;
+    const coeffMeans = new Array(coeffCount).fill(0);
+    for (let frameIndex = 0; frameIndex < mfccMatrix.length; frameIndex += 1) {
+      for (let coeff = 0; coeff < coeffCount; coeff += 1) {
+        coeffMeans[coeff] += mfccMatrix[frameIndex][coeff];
+      }
+    }
+    for (let coeff = 0; coeff < coeffCount; coeff += 1) {
+      coeffMeans[coeff] /= Math.max(1, mfccMatrix.length);
+    }
+
+    const coeffStd = new Array(coeffCount).fill(0);
+    for (let frameIndex = 0; frameIndex < mfccMatrix.length; frameIndex += 1) {
+      for (let coeff = 0; coeff < coeffCount; coeff += 1) {
+        const centered = mfccMatrix[frameIndex][coeff] - coeffMeans[coeff];
+        coeffStd[coeff] += centered * centered;
+      }
+    }
+    for (let coeff = 0; coeff < coeffCount; coeff += 1) {
+      coeffStd[coeff] = Math.sqrt(coeffStd[coeff] / Math.max(1, mfccMatrix.length));
+    }
+
+    return {
+      mel: {
+        bands: melBands,
+        minHz,
+        maxHz,
+        globalMeanDb: globalMean,
+        globalStdDb: Math.sqrt(globalVar),
+        bandMeanRangeDb:
+          sortedBandMeans.length > 0
+            ? sortedBandMeans[sortedBandMeans.length - 1] - sortedBandMeans[0]
+            : 0,
+        adjacentBandCorrelationMean:
+          adjacentCorrelationCount > 0 ? adjacentCorrelationSum / adjacentCorrelationCount : 0
+      },
+      mfcc: {
+        coeffs: coeffCount,
+        c0Mean: coeffCount > 0 ? coeffMeans[0] : 0,
+        c0Std: coeffCount > 0 ? coeffStd[0] : 0,
+        coeffMeanAbs: meanOfNumbers(
+          coeffMeans.map(function (value) {
+            return Math.abs(value);
+          })
+        )
+      },
+      delta: {
+        melDeltaRms: deltaRms,
+        melDeltaDeltaRms: delta2Rms
+      }
+    };
+  }
+
+  function summarizeModulation(frameEnergyDb, hopSeconds) {
+    if (!frameEnergyDb || frameEnergyDb.length < 8 || hopSeconds <= 0) {
+      return {
+        frameRateHz: 0,
+        dominantModulationHz: 0,
+        bandEnergy: {
+          hz_0_5_2: 0,
+          hz_2_4: 0,
+          hz_4_8: 0,
+          hz_8_16: 0,
+          hz_16_32: 0
+        },
+        lowToHighRatio: 0
+      };
+    }
+
+    const envelope = frameEnergyDb.slice();
+    const envelopeMean = meanOfNumbers(envelope);
+    for (let index = 0; index < envelope.length; index += 1) {
+      envelope[index] -= envelopeMean;
+    }
+
+    let nfft = 1;
+    while (nfft < envelope.length) {
+      nfft *= 2;
+    }
+
+    const re = new Float64Array(nfft);
+    const im = new Float64Array(nfft);
+    for (let index = 0; index < envelope.length; index += 1) {
+      re[index] = envelope[index];
+    }
+    fftInPlace(re, im);
+
+    const frameRateHz = 1 / hopSeconds;
+    const bandEnergy = {
+      hz_0_5_2: 0,
+      hz_2_4: 0,
+      hz_4_8: 0,
+      hz_8_16: 0,
+      hz_16_32: 0
+    };
+
+    let dominantFrequency = 0;
+    let dominantPower = 0;
+    for (let bin = 1; bin < nfft / 2; bin += 1) {
+      const frequency = (bin * frameRateHz) / nfft;
+      const power = re[bin] * re[bin] + im[bin] * im[bin];
+
+      if (frequency >= 0.5 && frequency <= 32 && power > dominantPower) {
+        dominantPower = power;
+        dominantFrequency = frequency;
+      }
+
+      if (frequency >= 0.5 && frequency < 2) {
+        bandEnergy.hz_0_5_2 += power;
+      } else if (frequency >= 2 && frequency < 4) {
+        bandEnergy.hz_2_4 += power;
+      } else if (frequency >= 4 && frequency < 8) {
+        bandEnergy.hz_4_8 += power;
+      } else if (frequency >= 8 && frequency < 16) {
+        bandEnergy.hz_8_16 += power;
+      } else if (frequency >= 16 && frequency <= 32) {
+        bandEnergy.hz_16_32 += power;
+      }
+    }
+
+    const low = bandEnergy.hz_0_5_2 + bandEnergy.hz_2_4;
+    const high = bandEnergy.hz_4_8 + bandEnergy.hz_8_16;
+
+    return {
+      frameRateHz,
+      dominantModulationHz: dominantFrequency,
+      bandEnergy,
+      lowToHighRatio: high > 0 ? low / high : 0
+    };
+  }
+
   function computeMetricsReport(audioData) {
     if (!audioData || !audioData.samples || audioData.samples.length === 0) {
       return null;
@@ -1459,20 +2186,33 @@
     const std = Math.sqrt(variance);
     const rms = Math.sqrt(sumSquares / sampleCount);
     const peakAbs = Math.max(Math.abs(min), Math.abs(max));
-    const crestFactor = peakAbs / Math.max(1e-12, rms);
+    const truePeakAbs = truePeakLinear(samples, METRICS_TRUE_PEAK_OVERSAMPLE);
+    const crestFactor = truePeakAbs / Math.max(1e-12, rms);
     const zcr = zeroCrossings / Math.max(1, sampleCount - 1);
     const clippingRatio = clippingCount / sampleCount;
     const energy = sumSquares;
-    const meanPowerDb = 10 * Math.log10(sumSquares / sampleCount + 1e-12);
+    const meanPower = sumSquares / sampleCount;
+    const meanPowerDb = 10 * Math.log10(meanPower + 1e-12);
 
     const distributionSample = sampleForDistribution(samples, METRICS_DISTRIBUTION_SAMPLE_LIMIT);
     const sortedDistribution = distributionSample.slice().sort(function (a, b) {
       return a - b;
     });
     const median = quantileSorted(sortedDistribution, 0.5);
+    const q05 = quantileSorted(sortedDistribution, 0.05);
     const q25 = quantileSorted(sortedDistribution, 0.25);
     const q75 = quantileSorted(sortedDistribution, 0.75);
+    const q95 = quantileSorted(sortedDistribution, 0.95);
     const iqr = q75 - q25;
+
+    const absDistribution = distributionSample.map(function (value) {
+      return Math.abs(value);
+    });
+    const sortedAbsDistribution = absDistribution.slice().sort(function (a, b) {
+      return a - b;
+    });
+    const p05Abs = quantileSorted(sortedAbsDistribution, 0.05);
+    const p95Abs = quantileSorted(sortedAbsDistribution, 0.95);
 
     let moment3 = 0;
     let moment4 = 0;
@@ -1489,12 +2229,16 @@
     const kurtosisExcess = std > 1e-12 ? moment4 / Math.pow(std, 4) - 3 : 0;
 
     const frameSummary = summarizeFrames(samples, sampleRate);
+    const hopSeconds = sampleRate > 0 ? frameSummary.hopSize / sampleRate : METRICS_HOP_SIZE_SECONDS;
     const frameEnergyDb = frameSummary.energyByFrame.map(function (value) {
       return 10 * Math.log10(value + 1e-12);
     });
     const sortedFrameEnergyDb = frameEnergyDb.slice().sort(function (a, b) {
       return a - b;
     });
+    const frameEnergyMean = meanOfNumbers(frameSummary.energyByFrame);
+    const frameEnergyVariance = Math.pow(stdOfNumbers(frameSummary.energyByFrame, frameEnergyMean), 2);
+    const frameEnergyStd = Math.sqrt(Math.max(0, frameEnergyVariance));
     const maxFrameDb = sortedFrameEnergyDb.length
       ? sortedFrameEnergyDb[sortedFrameEnergyDb.length - 1]
       : -120;
@@ -1503,7 +2247,6 @@
 
     let silenceFrames = 0;
     let activeFrames = 0;
-    let voicedFrames = 0;
     let activeEnergyAccum = 0;
     let activeEnergyCount = 0;
     let inactiveEnergyAccum = 0;
@@ -1511,7 +2254,6 @@
 
     for (let index = 0; index < frameEnergyDb.length; index += 1) {
       const energyDb = frameEnergyDb[index];
-      const frameZcr = frameSummary.zcrByFrame[index];
       const isSilent = energyDb < silenceThresholdDb;
       const isActive = energyDb >= activeThresholdDb;
       if (isSilent) {
@@ -1521,9 +2263,6 @@
         activeFrames += 1;
         activeEnergyAccum += energyDb;
         activeEnergyCount += 1;
-        if (frameZcr >= 0.02 && frameZcr <= 0.25) {
-          voicedFrames += 1;
-        }
       } else {
         inactiveEnergyAccum += energyDb;
         inactiveEnergyCount += 1;
@@ -1533,14 +2272,11 @@
     const frameCount = Math.max(1, frameSummary.frameCount);
     const speechActivityRatio = activeFrames / frameCount;
     const silenceRatio = silenceFrames / frameCount;
-    const voicedRatio = voicedFrames / frameCount;
-    const meanFrameEnergyDb = frameEnergyDb.length
-      ? frameEnergyDb.reduce(function (acc, value) {
-          return acc + value;
-        }, 0) / frameEnergyDb.length
-      : -120;
-    const dynamicRangeDb =
-      quantileSorted(sortedFrameEnergyDb, 0.95) - quantileSorted(sortedFrameEnergyDb, 0.05);
+    const meanFrameEnergyDb = meanOfNumbers(frameEnergyDb);
+    const frameEnergyP95 = quantileSorted(sortedFrameEnergyDb, 0.95);
+    const frameEnergyP50 = quantileSorted(sortedFrameEnergyDb, 0.5);
+    const frameEnergyP05 = quantileSorted(sortedFrameEnergyDb, 0.05);
+    const dynamicRangeDb = frameEnergyP95 - frameEnergyP05;
     const speechSnrProxyDb =
       activeEnergyCount > 0 && inactiveEnergyCount > 0
         ? activeEnergyAccum / activeEnergyCount - inactiveEnergyAccum / inactiveEnergyCount
@@ -1548,25 +2284,53 @@
 
     const histogram = summarizeHistogram(distributionSample, METRICS_HISTOGRAM_BINS, -1, 1);
     const autocorrelation = summarizeAutocorrelation(samples, sampleRate);
+    const shortTimeAuto = summarizeAutocorrelation(Float32Array.from(frameSummary.energyByFrame), 100);
+    const correlationTimeSeconds = estimateCorrelationTime(samples, sampleRate);
+    const onset = detectOnsetsFromFrameEnergy(frameEnergyDb, hopSeconds);
+    const slopes = summarizeSlopeDistribution(frameEnergyDb, hopSeconds);
+    const pitch = estimatePitchStats(
+      samples,
+      sampleRate,
+      frameSummary.frameSize,
+      frameSummary.hopSize,
+      frameEnergyDb,
+      activeThresholdDb
+    );
+    const modulation = summarizeModulation(frameEnergyDb, hopSeconds);
 
-    const frameEnergyMean =
-      frameSummary.energyByFrame.length > 0
-        ? frameSummary.energyByFrame.reduce(function (acc, value) {
-            return acc + value;
-          }, 0) / frameSummary.energyByFrame.length
-        : 0;
-    const sortedFrameEnergy = frameSummary.energyByFrame.slice().sort(function (a, b) {
+    const sortedFrameEnergyLinear = frameSummary.energyByFrame.slice().sort(function (a, b) {
       return a - b;
     });
-    const frameEnergyVariance =
-      frameSummary.energyByFrame.length > 0
-        ? frameSummary.energyByFrame.reduce(function (acc, value) {
-            const centered = value - frameEnergyMean;
-            return acc + centered * centered;
-          }, 0) / frameSummary.energyByFrame.length
-        : 0;
 
-    const shortTimeAuto = summarizeAutocorrelation(Float32Array.from(frameSummary.energyByFrame), 100);
+    const stftParams = getDefaultStftParams();
+    const metricsStft = computeStft(
+      samples,
+      sampleRate,
+      stftParams.windowSize,
+      stftParams.hopSize,
+      Math.min(stftParams.maxFrames, 1200),
+      stftParams.windowType
+    );
+    const spectral = summarizeSpectralFeatures(metricsStft);
+    const melMfcc = summarizeMelMfccFeatures(metricsStft);
+
+    const standards = {
+      leqDbfs: meanPowerDb,
+      l10Dbfs: frameEnergyP95,
+      l50Dbfs: frameEnergyP50,
+      l90Dbfs: frameEnergyP05,
+      calibrationNote:
+        "dBFS-relative values only (not calibrated SPL/LUFS). Absolute acoustics need calibration and standard weighting."
+    };
+
+    const availability = {
+      intrusiveMetrics:
+        "Unavailable without clean reference clip (SI-SDR/STOI/PESQ/POLQA require reference).",
+      roomAcoustics:
+        "Unavailable without RIR / room measurement chain (RT/EDT/C50/D50/STI/SII).",
+      classwise:
+        "Unavailable without class labels (planned Phase 8)."
+    };
 
     return {
       generatedAt: new Date().toISOString(),
@@ -1576,17 +2340,47 @@
         sampleRate,
         channelCount,
         durationSeconds,
+        mean,
+        dcOffset: mean,
+        meanAbs,
+        variance,
+        std,
         min,
         max,
-        mean,
-        meanAbs,
         rms,
         peakAbs,
+        truePeakAbs,
         crestFactor,
         zcr,
         clippingRatio,
+        silenceRatio,
         energy,
-        meanPowerDb
+        meanPower,
+        meanPowerDb,
+        amplitudeP95P05: p95Abs - p05Abs
+      },
+      temporal: {
+        autocorrelation,
+        correlationTimeSeconds,
+        onset,
+        stationarity: {
+          frameEnergyStd,
+          frameEnergyCv: frameEnergyMean > 1e-12 ? frameEnergyStd / frameEnergyMean : 0,
+          changePointCount: frameEnergyDb.reduce(function (acc, value, index) {
+            if (index === 0) {
+              return acc;
+            }
+            return acc + (Math.abs(value - frameEnergyDb[index - 1]) >= METRICS_CHANGEPOINT_DB ? 1 : 0);
+          }, 0)
+        },
+        envelope: {
+          frameEnergyMean,
+          frameEnergyStd,
+          frameEnergyP05,
+          frameEnergyP50,
+          frameEnergyP95,
+          attackDecay: slopes
+        }
       },
       speech: {
         frameSize: frameSummary.frameSize,
@@ -1594,12 +2388,21 @@
         frameCount: frameSummary.frameCount,
         silenceRatio,
         speechActivityRatio,
-        voicedRatio,
+        voicedRatio: pitch.voicedRatio,
         meanFrameEnergyDb,
         dynamicRangeDb,
         speechSnrProxyDb,
-        heuristic: "Energy + ZCR heuristic (not ASR-grade VAD)."
+        f0: pitch,
+        speakingRateProxyHz: onset.onsetRateHz,
+        heuristic: "Energy + autocorrelation heuristics (diagnostic, not ASR-grade VAD/pitch)."
       },
+      spectral,
+      spectrogramFeatures: melMfcc,
+      modulation,
+      spatial: audioData.spatialSummary || {
+        note: "Requires at least 2 decoded channels."
+      },
+      standards,
       statistical: {
         mean,
         std,
@@ -1607,8 +2410,10 @@
         min,
         max,
         median,
+        q05,
         q25,
         q75,
+        q95,
         iqr,
         skewness,
         kurtosisExcess
@@ -1625,18 +2430,19 @@
       },
       features: {
         power: {
-          meanPower: sumSquares / sampleCount,
+          meanPower,
           meanPowerDb
         },
         autocorrelation,
         shortTimePower: {
           frameMean: frameEnergyMean,
           frameStd: Math.sqrt(Math.max(0, frameEnergyVariance)),
-          frameP95: quantileSorted(sortedFrameEnergy, 0.95),
-          frameP05: quantileSorted(sortedFrameEnergy, 0.05)
+          frameP95: quantileSorted(sortedFrameEnergyLinear, 0.95),
+          frameP05: quantileSorted(sortedFrameEnergyLinear, 0.05)
         },
         shortTimeAutocorrelation: shortTimeAuto
-      }
+      },
+      availability
     };
   }
 
@@ -1830,6 +2636,12 @@
 
     if (state.metrics.audio) {
       output.sections.audio = report.audio;
+      output.sections.temporal = report.temporal;
+      output.sections.spectral = report.spectral;
+      output.sections.spectrogramFeatures = report.spectrogramFeatures;
+      output.sections.modulation = report.modulation;
+      output.sections.spatial = report.spatial;
+      output.sections.standards = report.standards;
     }
     if (state.metrics.speech) {
       output.sections.speech = report.speech;
@@ -1964,19 +2776,180 @@
       " s).";
 
     if (state.metrics.audio) {
-      const rows = [
+      const timeRows = [
         ["Duration", formatMetricNumber(report.audio.durationSeconds, 3) + " s"],
         ["Sample rate", formatMetricNumber(report.audio.sampleRate, 0) + " Hz"],
         ["Channels", String(report.audio.channelCount)],
+        ["DC offset", formatMetricNumber(report.audio.dcOffset, 7)],
         ["RMS", formatMetricNumber(report.audio.rms, 6)],
         ["Peak |x|", formatMetricNumber(report.audio.peakAbs, 6)],
+        ["True peak (4x linear)", formatMetricNumber(report.audio.truePeakAbs, 6)],
         ["Crest factor", formatMetricNumber(report.audio.crestFactor, 3)],
         ["ZCR", formatMetricNumber(report.audio.zcr, 6)],
         ["Mean power", formatMetricNumber(report.features.power.meanPower, 8)],
         ["Mean power (dB)", formatMetricNumber(report.audio.meanPowerDb, 2) + " dB"],
-        ["Clipping ratio", formatMetricPercent(report.audio.clippingRatio)]
+        ["Clipping ratio", formatMetricPercent(report.audio.clippingRatio)],
+        ["Silence ratio", formatMetricPercent(report.audio.silenceRatio)],
+        ["|x| P95-P05", formatMetricNumber(report.audio.amplitudeP95P05, 6)]
       ];
-      metricsContent.appendChild(createMetricsGroup("Audio Metrics", rows));
+      metricsContent.appendChild(createMetricsGroup("Time-Domain & Dynamics", timeRows));
+
+      const temporalRows = [
+        ["Autocorr peak lag", String(report.temporal.autocorrelation.bestLag)],
+        ["Autocorr peak corr", formatMetricNumber(report.temporal.autocorrelation.bestCorrelation, 5)],
+        [
+          "Autocorr F0 proxy",
+          report.temporal.autocorrelation.estimatedF0Hz > 0
+            ? formatMetricNumber(report.temporal.autocorrelation.estimatedF0Hz, 2) + " Hz"
+            : "n/a"
+        ],
+        [
+          "Correlation time",
+          formatMetricNumber(report.temporal.correlationTimeSeconds * 1000, 2) + " ms"
+        ],
+        ["Onset count", String(report.temporal.onset.onsetCount)],
+        ["Onset rate", formatMetricNumber(report.temporal.onset.onsetRateHz, 3) + " Hz"],
+        [
+          "Inter-onset median",
+          formatMetricNumber(report.temporal.onset.interOnsetMedianSeconds, 3) + " s"
+        ],
+        [
+          "Change points (>=6 dB/frame)",
+          String(report.temporal.stationarity.changePointCount)
+        ],
+        [
+          "Frame-energy CV",
+          formatMetricNumber(report.temporal.stationarity.frameEnergyCv, 4)
+        ],
+        [
+          "Attack P95",
+          formatMetricNumber(report.temporal.envelope.attackDecay.attackP95DbPerSecond, 1) +
+            " dB/s"
+        ],
+        [
+          "Decay P95",
+          formatMetricNumber(report.temporal.envelope.attackDecay.decayP95DbPerSecond, 1) +
+            " dB/s"
+        ]
+      ];
+      metricsContent.appendChild(createMetricsGroup("Temporal Structure", temporalRows));
+
+      if (report.spectral) {
+        const spectralRows = [
+          [
+            "Dominant frequency",
+            formatMetricNumber(report.spectral.dominantFrequencyHz, 2) + " Hz"
+          ],
+          [
+            "Spectral centroid mean",
+            formatMetricNumber(report.spectral.centroidMeanHz, 2) + " Hz"
+          ],
+          [
+            "Spectral spread mean",
+            formatMetricNumber(report.spectral.spreadMeanHz, 2) + " Hz"
+          ],
+          [
+            "Spectral slope",
+            formatMetricNumber(report.spectral.spectralSlopeDbPerDecade, 3) + " dB/dec"
+          ],
+          ["Flatness mean", formatMetricNumber(report.spectral.flatnessMean, 4)],
+          ["Entropy mean", formatMetricNumber(report.spectral.entropyMean, 4)],
+          ["Roll-off 85% mean", formatMetricNumber(report.spectral.rolloff85MeanHz, 2) + " Hz"],
+          ["Tonality proxy", formatMetricNumber(report.spectral.tonalityProxy, 4)],
+          [
+            "Band power low/mid/high",
+            formatMetricPercent(report.spectral.bandPower.low20_250.ratio) +
+              " / " +
+              formatMetricPercent(report.spectral.bandPower.mid250_2k.ratio) +
+              " / " +
+              formatMetricPercent(report.spectral.bandPower.high2k_8k.ratio)
+          ]
+        ];
+        metricsContent.appendChild(createMetricsGroup("Spectral & PSD", spectralRows));
+      }
+
+      if (report.spectrogramFeatures) {
+        const tfRows = [
+          [
+            "Mel global mean/std",
+            formatMetricNumber(report.spectrogramFeatures.mel.globalMeanDb, 2) +
+              " / " +
+              formatMetricNumber(report.spectrogramFeatures.mel.globalStdDb, 2) +
+              " dB"
+          ],
+          [
+            "Mel band-mean range",
+            formatMetricNumber(report.spectrogramFeatures.mel.bandMeanRangeDb, 2) + " dB"
+          ],
+          [
+            "Adjacent-band corr mean",
+            formatMetricNumber(report.spectrogramFeatures.mel.adjacentBandCorrelationMean, 4)
+          ],
+          [
+            "MFCC c0 mean/std",
+            formatMetricNumber(report.spectrogramFeatures.mfcc.c0Mean, 3) +
+              " / " +
+              formatMetricNumber(report.spectrogramFeatures.mfcc.c0Std, 3)
+          ],
+          [
+            "Mel delta RMS",
+            formatMetricNumber(report.spectrogramFeatures.delta.melDeltaRms, 4)
+          ],
+          [
+            "Mel delta-delta RMS",
+            formatMetricNumber(report.spectrogramFeatures.delta.melDeltaDeltaRms, 4)
+          ]
+        ];
+        metricsContent.appendChild(createMetricsGroup("Spectrogram Feature Stats", tfRows));
+      }
+
+      const modulationRows = [
+        [
+          "Dominant modulation",
+          formatMetricNumber(report.modulation.dominantModulationHz, 3) + " Hz"
+        ],
+        ["Low/high modulation ratio", formatMetricNumber(report.modulation.lowToHighRatio, 4)],
+        [
+          "Band 0.5-2 / 2-4 / 4-8",
+          formatMetricNumber(report.modulation.bandEnergy.hz_0_5_2, 3) +
+            " / " +
+            formatMetricNumber(report.modulation.bandEnergy.hz_2_4, 3) +
+            " / " +
+            formatMetricNumber(report.modulation.bandEnergy.hz_4_8, 3)
+        ]
+      ];
+      metricsContent.appendChild(createMetricsGroup("Modulation Domain", modulationRows));
+
+      if (report.spatial && report.spatial.note) {
+        metricsContent.appendChild(
+          createMetricsGroup("Spatial / Multichannel", [["Status", report.spatial.note]])
+        );
+      } else if (report.spatial) {
+        const spatialRows = [
+          [
+            "Inter-channel correlation",
+            formatMetricNumber(report.spatial.interChannelCorrelation, 4)
+          ],
+          ["Coherence proxy", formatMetricNumber(report.spatial.coherenceProxy, 4)],
+          ["ILD", formatMetricNumber(report.spatial.ildDb, 2) + " dB"],
+          [
+            "Best lag (samples/ms)",
+            String(report.spatial.bestLagSamples) +
+              " / " +
+              formatMetricNumber(report.spatial.bestLagMs, 3)
+          ]
+        ];
+        metricsContent.appendChild(createMetricsGroup("Spatial / Multichannel", spatialRows));
+      }
+
+      const standardsRows = [
+        ["Leq (dBFS)", formatMetricNumber(report.standards.leqDbfs, 2) + " dBFS"],
+        ["L10/L50/L90 (dBFS)", formatMetricNumber(report.standards.l10Dbfs, 2) +
+            " / " + formatMetricNumber(report.standards.l50Dbfs, 2) +
+            " / " + formatMetricNumber(report.standards.l90Dbfs, 2)],
+        ["Note", report.standards.calibrationNote]
+      ];
+      metricsContent.appendChild(createMetricsGroup("Acoustics / Standards Proxy", standardsRows));
     }
 
     if (state.metrics.speech) {
@@ -1989,7 +2962,20 @@
         ["Voiced ratio", formatMetricPercent(report.speech.voicedRatio)],
         ["Mean frame energy", formatMetricNumber(report.speech.meanFrameEnergyDb, 2) + " dB"],
         ["Energy dynamic range", formatMetricNumber(report.speech.dynamicRangeDb, 2) + " dB"],
-        ["Speech SNR proxy", formatMetricNumber(report.speech.speechSnrProxyDb, 2) + " dB"]
+        ["Speech SNR proxy", formatMetricNumber(report.speech.speechSnrProxyDb, 2) + " dB"],
+        ["F0 mean", formatMetricNumber(report.speech.f0.f0MeanHz, 2) + " Hz"],
+        [
+          "F0 min/med/max",
+          formatMetricNumber(report.speech.f0.f0MinHz, 2) +
+            " / " +
+            formatMetricNumber(report.speech.f0.f0MedianHz, 2) +
+            " / " +
+            formatMetricNumber(report.speech.f0.f0MaxHz, 2) +
+            " Hz"
+        ],
+        ["Jitter (local)", formatMetricPercent(report.speech.f0.jitterLocal)],
+        ["Shimmer (local)", formatMetricPercent(report.speech.f0.shimmerLocal)],
+        ["Syllable/onset proxy", formatMetricNumber(report.speech.speakingRateProxyHz, 3) + " Hz"]
       ];
       metricsContent.appendChild(createMetricsGroup("Speech Metrics (Heuristic)", rows));
     }
@@ -2001,9 +2987,11 @@
         ["Variance", formatMetricNumber(report.statistical.variance, 6)],
         ["Min", formatMetricNumber(report.statistical.min, 6)],
         ["Max", formatMetricNumber(report.statistical.max, 6)],
+        ["Q05", formatMetricNumber(report.statistical.q05, 6)],
         ["Median", formatMetricNumber(report.statistical.median, 6)],
         ["Q25", formatMetricNumber(report.statistical.q25, 6)],
         ["Q75", formatMetricNumber(report.statistical.q75, 6)],
+        ["Q95", formatMetricNumber(report.statistical.q95, 6)],
         ["IQR", formatMetricNumber(report.statistical.iqr, 6)],
         ["Skewness", formatMetricNumber(report.statistical.skewness, 4)],
         ["Kurtosis excess", formatMetricNumber(report.statistical.kurtosisExcess, 4)]
@@ -2029,7 +3017,7 @@
     if (state.metrics.classwise) {
       metricsContent.appendChild(
         createMetricsGroup("Classwise Metrics", [
-          ["Status", "Requires labels/metadata (planned for Phase 8)."]
+          ["Status", report.availability.classwise]
         ])
       );
     }
@@ -2087,6 +3075,13 @@
     if (featureRows.length > 0) {
       metricsContent.appendChild(createMetricsGroup("Feature Diagnostics", featureRows));
     }
+
+    metricsContent.appendChild(
+      createMetricsGroup("Availability Notes", [
+        ["Intrusive metrics", report.availability.intrusiveMetrics],
+        ["Room/intelligibility metrics", report.availability.roomAcoustics]
+      ])
+    );
 
     if (metricsContent.childElementCount === 0) {
       metricsContent.appendChild(
@@ -2685,6 +3680,83 @@
     postState();
   }
 
+  function summarizeStereoSpatial(channelA, channelB, sampleRate) {
+    if (!channelA || !channelB || channelA.length === 0 || channelB.length === 0 || sampleRate <= 0) {
+      return null;
+    }
+
+    const scanCount = Math.min(channelA.length, channelB.length, Math.max(sampleRate * 30, 48000));
+    if (scanCount < 8) {
+      return null;
+    }
+
+    const stride = Math.max(1, Math.floor(scanCount / 200000));
+    let leftMean = 0;
+    let rightMean = 0;
+    let count = 0;
+    for (let index = 0; index < scanCount; index += stride) {
+      leftMean += channelA[index];
+      rightMean += channelB[index];
+      count += 1;
+    }
+    leftMean /= Math.max(1, count);
+    rightMean /= Math.max(1, count);
+
+    let leftVar = 0;
+    let rightVar = 0;
+    let covariance = 0;
+    let leftEnergy = 0;
+    let rightEnergy = 0;
+    for (let index = 0; index < scanCount; index += stride) {
+      const left = channelA[index] - leftMean;
+      const right = channelB[index] - rightMean;
+      leftVar += left * left;
+      rightVar += right * right;
+      covariance += left * right;
+
+      const rawLeft = channelA[index];
+      const rawRight = channelB[index];
+      leftEnergy += rawLeft * rawLeft;
+      rightEnergy += rawRight * rawRight;
+    }
+
+    const denom = Math.max(1e-12, Math.sqrt(leftVar * rightVar));
+    const interChannelCorrelation = covariance / denom;
+    const coherenceProxy = interChannelCorrelation * interChannelCorrelation;
+    const leftRms = Math.sqrt(leftEnergy / Math.max(1, count));
+    const rightRms = Math.sqrt(rightEnergy / Math.max(1, count));
+    const ildDb = 20 * Math.log10((leftRms + 1e-12) / (rightRms + 1e-12));
+
+    const maxLag = Math.max(1, Math.min(Math.floor(sampleRate * 0.01), 512));
+    let bestLag = 0;
+    let bestScore = Number.NEGATIVE_INFINITY;
+    for (let lag = -maxLag; lag <= maxLag; lag += 1) {
+      let sum = 0;
+      let lagCount = 0;
+      const start = lag < 0 ? -lag : 0;
+      const end = lag < 0 ? scanCount : scanCount - lag;
+      for (let index = start; index < end; index += stride) {
+        sum += channelA[index] * channelB[index + lag];
+        lagCount += 1;
+      }
+      const normalized = lagCount > 0 ? sum / lagCount : Number.NEGATIVE_INFINITY;
+      if (normalized > bestScore) {
+        bestScore = normalized;
+        bestLag = lag;
+      }
+    }
+
+    return {
+      interChannelCorrelation,
+      coherenceProxy,
+      ildDb,
+      bestLagSamples: bestLag,
+      bestLagMs: (bestLag * 1000) / sampleRate,
+      leftRms,
+      rightRms
+    };
+  }
+
   async function decodeAudioToMono(file) {
     const arrayBuffer = await file.arrayBuffer();
     return decodeAudioArrayBufferToMono(arrayBuffer, file.name);
@@ -2710,9 +3782,16 @@
       const totalSamples = decoded.length;
       const channelCount = decodedChannels;
       const mono = new Float32Array(totalSamples);
+      let firstChannel = null;
+      let secondChannel = null;
 
       for (let channel = 0; channel < channelCount; channel += 1) {
         const channelData = decoded.getChannelData(channel);
+        if (channel === 0) {
+          firstChannel = channelData;
+        } else if (channel === 1) {
+          secondChannel = channelData;
+        }
         for (let index = 0; index < totalSamples; index += 1) {
           mono[index] += channelData[index];
         }
@@ -2721,6 +3800,11 @@
       for (let index = 0; index < totalSamples; index += 1) {
         mono[index] /= channelCount;
       }
+
+      const spatialSummary =
+        firstChannel && secondChannel
+          ? summarizeStereoSpatial(firstChannel, secondChannel, decoded.sampleRate)
+          : null;
 
       return {
         audioKey:
@@ -2737,7 +3821,8 @@
         sampleRate: decoded.sampleRate,
         channelCount,
         duration: decoded.duration,
-        samples: mono
+        samples: mono,
+        spatialSummary
       };
     } finally {
       await audioContext.close();

@@ -50,6 +50,7 @@ Template VS Code extension for audio EDA and ML workflows, aligned with the offi
 - Per-view interactions now include animated playhead scrollbar, click-to-seek, drag-to-pan, wheel zoom, and zoom reset.
 - Spectral views now support a per-view toggleable spectral value bar (color scale).
 - STFT view includes both magnitude and phase variants as selectable transform rows (`stft (magnitude)` / `stft (phase)`).
+- Metrics formula references and implementation notes are documented in `docs/METRICS_FORMULAE.md`.
 - Transform hyperparameters are configurable in-panel: STFT window/overlap/window-type/analysis span/frame cap, mel bands/min-max Hz, MFCC coeffs, and DCT coeffs.
 - Comparison modes now render with a decoded second clip: `side_by_side`, `stacked`, `overlay`, `side_by_side_difference`, and `stacked_difference`, plus a configurable second-clip time offset.
 - Focusing/opening an audio file can auto-open Audio EDA custom editor (`audioEda.openWorkbenchWhenAudioFileFocused`, default `true`).
