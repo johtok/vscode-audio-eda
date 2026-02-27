@@ -1459,7 +1459,7 @@
     return clamp(containerWidth - 24, 360, 1800);
   }
 
-  function drawWaveform(canvas, samples, startIndex, endIndex) {
+  function drawWaveform(canvas, samples, startIndex, endIndex, zoomLevel) {
     const ctx = canvas.getContext("2d");
     if (!ctx) {
       return;
@@ -1473,37 +1473,90 @@
 
     const mid = Math.floor(height / 2);
     const visibleCount = Math.max(1, endIndex - startIndex);
+    const shouldDrawConnectedDots = Number.isFinite(zoomLevel) && zoomLevel >= 30;
 
-    ctx.strokeStyle = "#7dd3fc";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
+    if (shouldDrawConnectedDots) {
+      const maxPoints = Math.max(64, Math.min(width * 2, 6000));
+      const stride = Math.max(1, Math.ceil(visibleCount / maxPoints));
+      const points = [];
 
-    for (let x = 0; x < width; x += 1) {
-      const from = startIndex + Math.floor((x / width) * visibleCount);
-      const to = startIndex + Math.floor(((x + 1) / width) * visibleCount);
-
-      let min = 1;
-      let max = -1;
-      const boundedTo = clamp(to, 0, samples.length);
-      const boundedFrom = clamp(from, 0, samples.length - 1);
-
-      for (let index = boundedFrom; index < Math.max(boundedFrom + 1, boundedTo); index += 1) {
-        const value = samples[index];
-        if (value < min) {
-          min = value;
-        }
-        if (value > max) {
-          max = value;
-        }
+      for (let index = startIndex; index < endIndex; index += stride) {
+        const boundedIndex = clamp(index, 0, samples.length - 1);
+        const value = samples[boundedIndex];
+        const sampleRatio = (index - startIndex) / Math.max(1, visibleCount - 1);
+        const x = sampleRatio * (width - 1);
+        const y = mid + value * (height * 0.46);
+        points.push({ x, y });
       }
 
-      const yMin = mid + min * (height * 0.46);
-      const yMax = mid + max * (height * 0.46);
-      ctx.moveTo(x + 0.5, yMin);
-      ctx.lineTo(x + 0.5, yMax);
-    }
+      const finalIndex = clamp(endIndex - 1, 0, samples.length - 1);
+      if (points.length === 0 || finalIndex > startIndex) {
+        const finalRatio = (endIndex - 1 - startIndex) / Math.max(1, visibleCount - 1);
+        points.push({
+          x: finalRatio * (width - 1),
+          y: mid + samples[finalIndex] * (height * 0.46)
+        });
+      }
 
-    ctx.stroke();
+      ctx.strokeStyle = "#7dd3fc";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+
+      for (let pointIndex = 0; pointIndex < points.length; pointIndex += 1) {
+        const point = points[pointIndex];
+        if (pointIndex === 0) {
+          ctx.moveTo(point.x, point.y);
+        } else {
+          ctx.lineTo(point.x, point.y);
+        }
+      }
+      ctx.stroke();
+
+      const pointRadius = points.length > 1200 ? 0.7 : points.length > 600 ? 0.9 : 1.2;
+      ctx.fillStyle = "#38bdf8";
+
+      for (let pointIndex = 0; pointIndex < points.length; pointIndex += 1) {
+        const point = points[pointIndex];
+        if (pointRadius <= 0.75) {
+          ctx.fillRect(point.x, point.y, 1.2, 1.2);
+        } else {
+          ctx.beginPath();
+          ctx.arc(point.x, point.y, pointRadius, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    } else {
+      ctx.strokeStyle = "#7dd3fc";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+
+      for (let x = 0; x < width; x += 1) {
+        const from = startIndex + Math.floor((x / width) * visibleCount);
+        const to = startIndex + Math.floor(((x + 1) / width) * visibleCount);
+
+        let min = 1;
+        let max = -1;
+        const boundedTo = clamp(to, 0, samples.length);
+        const boundedFrom = clamp(from, 0, samples.length - 1);
+
+        for (let index = boundedFrom; index < Math.max(boundedFrom + 1, boundedTo); index += 1) {
+          const value = samples[index];
+          if (value < min) {
+            min = value;
+          }
+          if (value > max) {
+            max = value;
+          }
+        }
+
+        const yMin = mid + min * (height * 0.46);
+        const yMax = mid + max * (height * 0.46);
+        ctx.moveTo(x + 0.5, yMin);
+        ctx.lineTo(x + 0.5, yMax);
+      }
+
+      ctx.stroke();
+    }
 
     ctx.strokeStyle = "rgba(255,255,255,0.24)";
     ctx.beginPath();
@@ -2261,7 +2314,13 @@
         const windowInfo = computeViewWindow(renderSpec.domainLength, item.id);
 
         if (renderSpec.type === "waveform") {
-          drawWaveform(canvas, renderSpec.samples, windowInfo.startIndex, windowInfo.endIndex);
+          drawWaveform(
+            canvas,
+            renderSpec.samples,
+            windowInfo.startIndex,
+            windowInfo.endIndex,
+            windowInfo.zoom
+          );
         } else {
           drawHeatmap(
             canvas,
