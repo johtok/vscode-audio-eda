@@ -11,8 +11,8 @@
         };
   const transformKinds = [
     { value: "timeseries", label: "timeseries" },
-    { value: "magnitude_spectrogram", label: "spectrogram (magnitude)" },
-    { value: "phase_spectrogram", label: "spectrogram (phase)" },
+    { value: "stft::magnitude", label: "stft (magnitude)" },
+    { value: "stft::phase", label: "stft (phase)" },
     { value: "mel", label: "mel" },
     { value: "mfcc", label: "mfcc" },
     { value: "dct", label: "dct" },
@@ -21,8 +21,10 @@
 
   const STFT_WINDOW_SIZE_OPTIONS = [128, 256, 512, 1024, 2048, 4096];
   const STFT_WINDOW_TYPES = ["hann", "hamming", "blackman", "rectangular"];
+  const STFT_MODES = ["magnitude", "phase"];
   const DEFAULT_TRANSFORM_PARAMS = {
     stft: {
+      mode: "magnitude",
       windowSize: 512,
       overlapPercent: 75,
       windowType: "hann",
@@ -235,8 +237,44 @@
     }
 
     state.stack.forEach(function (item) {
-      if (item && item.kind === "stft") {
-        item.kind = "magnitude_spectrogram";
+      if (!item || typeof item !== "object") {
+        return;
+      }
+
+      if (item.kind === "magnitude_spectrogram") {
+        item.kind = "stft";
+        if (!item.params || typeof item.params !== "object") {
+          item.params = {};
+        }
+        if (!item.params.stft || typeof item.params.stft !== "object") {
+          item.params.stft = {};
+        }
+        item.params.stft.mode = "magnitude";
+        return;
+      }
+
+      if (item.kind === "phase_spectrogram") {
+        item.kind = "stft";
+        if (!item.params || typeof item.params !== "object") {
+          item.params = {};
+        }
+        if (!item.params.stft || typeof item.params.stft !== "object") {
+          item.params.stft = {};
+        }
+        item.params.stft.mode = "phase";
+        return;
+      }
+
+      if (item.kind === "stft") {
+        if (!item.params || typeof item.params !== "object") {
+          item.params = {};
+        }
+        if (!item.params.stft || typeof item.params.stft !== "object") {
+          item.params.stft = {};
+        }
+        if (item.params.stft.mode !== "phase") {
+          item.params.stft.mode = "magnitude";
+        }
       }
     });
   }
@@ -348,6 +386,7 @@
 
   function sanitizeStftParams(stftSource) {
     const stft = stftSource || DEFAULT_TRANSFORM_PARAMS.stft;
+    const mode = STFT_MODES.indexOf(stft.mode) !== -1 ? stft.mode : "magnitude";
     const windowSize = sanitizeWindowSize(stft.windowSize);
     const overlapPercent = sanitizeInt(stft.overlapPercent, DEFAULT_TRANSFORM_PARAMS.stft.overlapPercent, 0, 95);
     const windowType = STFT_WINDOW_TYPES.indexOf(stft.windowType) !== -1 ? stft.windowType : "hann";
@@ -361,6 +400,7 @@
     const hopSize = Math.max(1, Math.round(windowSize * (1 - overlapPercent / 100)));
 
     return {
+      mode,
       windowSize,
       overlapPercent,
       windowType,
@@ -429,13 +469,17 @@
     return JSON.parse(JSON.stringify(source));
   }
 
-  function createDefaultParamsForKind(kind) {
+  function createDefaultParamsForKind(kind, stftMode) {
     ensureTransformParamState();
     const defaults = state.transformParams || DEFAULT_TRANSFORM_PARAMS;
 
-    if (kind === "magnitude_spectrogram" || kind === "phase_spectrogram" || kind === "stft") {
+    if (kind === "stft") {
+      const stft = cloneParams(defaults.stft);
+      if (stftMode === "phase" || stftMode === "magnitude") {
+        stft.mode = stftMode;
+      }
       return {
-        stft: cloneParams(defaults.stft)
+        stft
       };
     }
 
@@ -490,6 +534,26 @@
     ensureStackItemParams(item);
     const source = item.params.stft || state.transformParams.stft;
     return sanitizeStftParams(source);
+  }
+
+  function getItemStftMode(item) {
+    return getItemStftParams(item).mode;
+  }
+
+  function getTransformSelectorValue(item) {
+    if (item.kind === "stft") {
+      return "stft::" + getItemStftMode(item);
+    }
+
+    return item.kind;
+  }
+
+  function getTransformDisplayLabel(item) {
+    if (item.kind === "stft") {
+      return "stft (" + getItemStftMode(item) + ")";
+    }
+
+    return item.kind;
   }
 
   function getItemMelParams(item, sampleRate) {
@@ -600,11 +664,14 @@
 
   function createPresetStack(kinds) {
     const seed = Date.now();
-    return kinds.map(function (kind, index) {
+    return kinds.map(function (entry, index) {
+      const kind = typeof entry === "string" ? entry : entry.kind;
+      const stftMode =
+        typeof entry === "object" && entry && entry.mode === "phase" ? "phase" : "magnitude";
       return {
         id: "preset-" + seed + "-" + index,
         kind,
-        params: createDefaultParamsForKind(kind)
+        params: createDefaultParamsForKind(kind, kind === "stft" ? stftMode : undefined)
       };
     });
   }
@@ -613,8 +680,8 @@
     if (presetId === "transforms") {
       state.stack = createPresetStack([
         "timeseries",
-        "magnitude_spectrogram",
-        "phase_spectrogram",
+        { kind: "stft", mode: "magnitude" },
+        { kind: "stft", mode: "phase" },
         "mel",
         "mfcc",
         "dct",
@@ -622,7 +689,7 @@
       ]);
       state.pca.enabled = false;
     } else if (presetId === "metrics") {
-      state.stack = createPresetStack(["timeseries", "magnitude_spectrogram", "mel"]);
+      state.stack = createPresetStack(["timeseries", { kind: "stft", mode: "magnitude" }, "mel"]);
       state.metrics.audio = true;
       state.metrics.speech = true;
       state.metrics.statistical = true;
@@ -635,7 +702,7 @@
       state.pca.goal = "eda";
       state.pca.classwise = false;
     } else {
-      state.stack = createPresetStack(["timeseries", "magnitude_spectrogram", "mel"]);
+      state.stack = createPresetStack(["timeseries", { kind: "stft", mode: "magnitude" }, "mel"]);
       state.pca.enabled = false;
     }
 
@@ -1521,27 +1588,17 @@
     switch (kind) {
       case "timeseries":
         return "Raw waveform";
-      case "stft":
-      case "magnitude_spectrogram": {
+      case "stft": {
         const stft = ensureStft(item);
+        const mode = getItemStftMode(item);
+        const modeSuffix = mode === "phase" ? "phase(rad), " : "";
         return (
           stft.frameCount +
           " frames x " +
           stft.binCount +
-          " bins | win=" +
-          stft.fftSize +
-          ", overlap=" +
-          stft.overlapPercent +
-          "%"
-        );
-      }
-      case "phase_spectrogram": {
-        const stft = ensureStft(item);
-        return (
-          stft.frameCount +
-          " frames x " +
-          stft.binCount +
-          " bins | phase(rad), win=" +
+          " bins | " +
+          modeSuffix +
+          "win=" +
           stft.fftSize +
           ", overlap=" +
           stft.overlapPercent +
@@ -1596,8 +1653,28 @@
       };
     }
 
-    if (kind === "stft" || kind === "magnitude_spectrogram") {
+    if (kind === "stft") {
       const stft = ensureStft(item);
+      if (getItemStftMode(item) === "phase") {
+        return {
+          type: "matrix",
+          domainLength: stft.phaseFrames.length,
+          durationSeconds: stft.durationSeconds,
+          matrix: stft.phaseFrames,
+          valueRange: [-Math.PI, Math.PI],
+          valueUnit: "rad",
+          caption:
+            "STFT phase spectrogram (wrapped phase, radians) | fft=" +
+            stft.fftSize +
+            ", hop=" +
+            stft.hopSize +
+            ", overlap=" +
+            stft.overlapPercent +
+            "%, window=" +
+            stft.windowType
+        };
+      }
+
       return {
         type: "matrix",
         domainLength: stft.logMagnitudeFrames.length,
@@ -1618,27 +1695,6 @@
           ", analyzed=" +
           stft.durationSeconds.toFixed(2) +
           " s"
-      };
-    }
-
-    if (kind === "phase_spectrogram") {
-      const stft = ensureStft(item);
-      return {
-        type: "matrix",
-        domainLength: stft.phaseFrames.length,
-        durationSeconds: stft.durationSeconds,
-        matrix: stft.phaseFrames,
-        valueRange: [-Math.PI, Math.PI],
-        valueUnit: "rad",
-        caption:
-          "STFT phase spectrogram (wrapped phase, radians) | fft=" +
-          stft.fftSize +
-          ", hop=" +
-          stft.hopSize +
-          ", overlap=" +
-          stft.overlapPercent +
-          "%, window=" +
-          stft.windowType
       };
     }
 
@@ -2417,8 +2473,6 @@
   function rowUsesStft(kind) {
     return (
       kind === "stft" ||
-      kind === "magnitude_spectrogram" ||
-      kind === "phase_spectrogram" ||
       kind === "mel" ||
       kind === "mfcc" ||
       kind === "dct" ||
@@ -2488,7 +2542,7 @@
     const panel = document.createElement("div");
     panel.className = "stack-row-settings";
 
-    if (!rowUsesStft(item.kind) && item.kind !== "mfcc" && item.kind !== "dct") {
+    if (!rowUsesStft(item.kind)) {
       const note = document.createElement("div");
       note.className = "stack-row-settings-note";
       note.textContent =
@@ -2501,6 +2555,23 @@
 
     if (rowUsesStft(item.kind)) {
       const stftParams = getItemStftParams(item);
+      if (item.kind === "stft") {
+        addRowSettingSelect(
+          panel,
+          "STFT mode",
+          stftParams.mode,
+          STFT_MODES.map(function (mode) {
+            return {
+              value: mode,
+              label: mode
+            };
+          }),
+          function (nextValue) {
+            item.params.stft.mode = nextValue;
+            onRowParamsChanged();
+          }
+        );
+      }
       addRowSettingSelect(
         panel,
         "Window size",
@@ -2654,15 +2725,21 @@
         const option = document.createElement("option");
         option.value = kindOption.value;
         option.textContent = kindOption.label;
-        if (kindOption.value === item.kind) {
+        if (kindOption.value === getTransformSelectorValue(item)) {
           option.selected = true;
         }
         transformSelect.appendChild(option);
       });
 
       transformSelect.addEventListener("change", function () {
-        item.kind = transformSelect.value;
-        item.params = createDefaultParamsForKind(item.kind);
+        if (transformSelect.value.indexOf("stft::") === 0) {
+          const mode = transformSelect.value.split("::")[1] === "phase" ? "phase" : "magnitude";
+          item.kind = "stft";
+          item.params = createDefaultParamsForKind("stft", mode);
+        } else {
+          item.kind = transformSelect.value;
+          item.params = createDefaultParamsForKind(item.kind);
+        }
         clearDerivedCache();
         renderStackControls();
         renderTransformStack();
@@ -2732,7 +2809,7 @@
 
       const title = document.createElement("div");
       title.className = "transform-card-title";
-      title.textContent = (index + 1).toString() + ". " + item.kind;
+      title.textContent = (index + 1).toString() + ". " + getTransformDisplayLabel(item);
 
       const meta = document.createElement("div");
       meta.className = "transform-card-meta";

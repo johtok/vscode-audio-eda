@@ -49,7 +49,7 @@ Template VS Code extension for audio EDA and ML workflows, aligned with the offi
 - Current transform compute path mixes channels to mono and limits STFT-based analysis to ~20 seconds for responsiveness.
 - Per-view interactions now include animated playhead scrollbar, click-to-seek, drag-to-pan, wheel zoom, and zoom reset.
 - Spectral views now support a per-view toggleable spectral value bar (color scale).
-- Spectrogram modes include both magnitude and phase variants as selectable transform rows.
+- STFT view includes both magnitude and phase variants as selectable transform rows (`stft (magnitude)` / `stft (phase)`).
 - Transform hyperparameters are configurable in-panel: STFT window/overlap/window-type/analysis span/frame cap, mel bands/min-max Hz, MFCC coeffs, and DCT coeffs.
 - Focusing/opening an audio file can auto-open Audio EDA custom editor (`audioEda.openWorkbenchWhenAudioFileFocused`, default `true`).
 - Supported editor selector formats include `wav`, `flac`, `mp3`, `mpga`, `mpeg`, `ogg`, `m4a`, `aac`, `opus`, `sph`.

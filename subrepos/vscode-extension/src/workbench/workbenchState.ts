@@ -1,8 +1,6 @@
 export type TransformViewKind =
   | "timeseries"
   | "stft"
-  | "magnitude_spectrogram"
-  | "phase_spectrogram"
   | "mel"
   | "mfcc"
   | "dct"
@@ -14,12 +12,14 @@ export type ComparisonMode = "none" | "side_by_side" | "overlay" | "side_by_side
 
 export type PcaGoal = "eda" | "classification" | "denoising" | "doa_beamforming" | "enhancement";
 export type StftWindowType = "hann" | "hamming" | "blackman" | "rectangular";
+export type StftMode = "magnitude" | "phase";
 
 export interface TransformViewItem {
   id: string;
   kind: TransformViewKind;
   params?: {
     stft?: {
+      mode: StftMode;
       windowSize: number;
       overlapPercent: number;
       windowType: StftWindowType;
@@ -75,6 +75,7 @@ export interface WorkbenchState {
   };
   transformParams: {
     stft: {
+      mode: StftMode;
       windowSize: number;
       overlapPercent: number;
       windowType: StftWindowType;
@@ -101,9 +102,10 @@ export function createDefaultWorkbenchState(): WorkbenchState {
       { id: "view-1", kind: "timeseries", params: {} },
       {
         id: "view-2",
-        kind: "magnitude_spectrogram",
+        kind: "stft",
         params: {
           stft: {
+            mode: "magnitude",
             windowSize: 512,
             overlapPercent: 75,
             windowType: "hann",
@@ -117,6 +119,7 @@ export function createDefaultWorkbenchState(): WorkbenchState {
         kind: "mel",
         params: {
           stft: {
+            mode: "magnitude",
             windowSize: 512,
             overlapPercent: 75,
             windowType: "hann",
@@ -164,6 +167,7 @@ export function createDefaultWorkbenchState(): WorkbenchState {
     },
     transformParams: {
       stft: {
+        mode: "magnitude",
         windowSize: 512,
         overlapPercent: 75,
         windowType: "hann",
