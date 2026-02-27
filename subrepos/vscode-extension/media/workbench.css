@@ -129,7 +129,8 @@ h2 {
 
 button,
 select,
-input[type="file"] {
+input[type="file"],
+input[type="color"] {
   font: inherit;
   color: inherit;
 }
@@ -151,7 +152,8 @@ button:hover {
 }
 
 select,
-input[type="file"] {
+input[type="file"],
+input[type="color"] {
   width: 100%;
   border: 1px solid var(--vscode-input-border);
   background: var(--vscode-input-background);

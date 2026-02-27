@@ -22,6 +22,7 @@
   const STFT_WINDOW_SIZE_OPTIONS = [128, 256, 512, 1024, 2048, 4096];
   const STFT_WINDOW_TYPES = ["hann", "hamming", "blackman", "rectangular"];
   const STFT_MODES = ["magnitude", "phase"];
+  const DEFAULT_FLAG_OVERLAY_COLOR = "#ef4444";
   const DEFAULT_TRANSFORM_PARAMS = {
     stft: {
       mode: "magnitude",
@@ -58,7 +59,7 @@
 
   const bootstrapBase = window.__AUDIO_EDA_BOOTSTRAP__ || {
     stack: [],
-    overlay: { enabled: false, mode: "flag", csvName: null },
+    overlay: { enabled: false, mode: "flag", csvName: null, flagColor: DEFAULT_FLAG_OVERLAY_COLOR },
     comparison: { mode: "none", secondAudioName: null },
     metrics: {
       audio: true,
@@ -82,6 +83,7 @@
     typeof vscode.getState === "function" ? vscode.getState() : undefined;
   const bootstrap = mergeBootstrapState(bootstrapBase, persistedState);
   const state = JSON.parse(JSON.stringify(bootstrap));
+  ensureOverlayState();
   ensureTransformParamState();
   normalizeLegacyTransformKinds();
   normalizeStackItems();
@@ -101,6 +103,7 @@
   const overlayEnabled = byId("overlay-enabled");
   const overlayMode = byId("overlay-mode");
   const overlayCsv = byId("overlay-csv");
+  const overlayFlagColor = byId("overlay-flag-color");
   const overlayCsvHint = byId("overlay-csv-hint");
 
   const comparisonMode = byId("comparison-mode");
@@ -141,6 +144,8 @@
   let primaryAudioUrl = null;
   let primaryAudioLocked = false;
   let customFilterbank = null;
+  let overlayParsed = null;
+  let overlayStatusMessage = "";
   let derivedCache = createEmptyDerivedCache();
   let resizeTick = 0;
   let selectedViewId = null;
@@ -332,6 +337,24 @@
     }
   }
 
+  function ensureOverlayState() {
+    if (!state.overlay || typeof state.overlay !== "object") {
+      state.overlay = {
+        enabled: false,
+        mode: "flag",
+        csvName: null,
+        flagColor: DEFAULT_FLAG_OVERLAY_COLOR
+      };
+      return;
+    }
+
+    if (typeof state.overlay.flagColor !== "string") {
+      state.overlay.flagColor = DEFAULT_FLAG_OVERLAY_COLOR;
+    }
+
+    state.overlay.flagColor = sanitizeHexColor(state.overlay.flagColor, DEFAULT_FLAG_OVERLAY_COLOR);
+  }
+
   function createEmptyDerivedCache() {
     return {
       stftByKey: Object.create(null),
@@ -362,6 +385,40 @@
     }
 
     return clamp(parsed, min, max);
+  }
+
+  function sanitizeHexColor(raw, fallback) {
+    if (typeof raw !== "string") {
+      return fallback;
+    }
+
+    const trimmed = raw.trim();
+    if (/^#[0-9a-fA-F]{6}$/.test(trimmed)) {
+      return trimmed.toLowerCase();
+    }
+
+    if (/^#[0-9a-fA-F]{3}$/.test(trimmed)) {
+      const r = trimmed.charAt(1);
+      const g = trimmed.charAt(2);
+      const b = trimmed.charAt(3);
+      return ("#" + r + r + g + g + b + b).toLowerCase();
+    }
+
+    return fallback;
+  }
+
+  function hexToRgb(hexColor) {
+    const normalized = sanitizeHexColor(hexColor, DEFAULT_FLAG_OVERLAY_COLOR);
+    const value = normalized.slice(1);
+    return {
+      r: Number.parseInt(value.slice(0, 2), 16),
+      g: Number.parseInt(value.slice(2, 4), 16),
+      b: Number.parseInt(value.slice(4, 6), 16)
+    };
+  }
+
+  function rgbToRgbaString(rgb, alpha) {
+    return "rgba(" + rgb.r + ", " + rgb.g + ", " + rgb.b + ", " + alpha + ")";
   }
 
   function sanitizeWindowSize(raw) {
@@ -626,12 +683,14 @@
   }
 
   function updateOverlayCsvHint() {
+    const statusSuffix = overlayStatusMessage ? " | " + overlayStatusMessage : "";
+
     if (state.overlay.mode === "flag") {
-      overlayCsvHint.textContent = "Expected columns: t,flag";
+      overlayCsvHint.textContent = "Expected columns: t,flag" + statusSuffix;
       return;
     }
 
-    overlayCsvHint.textContent = "Expected columns: flag,t_start,t_end";
+    overlayCsvHint.textContent = "Expected columns: flag,t_start,t_end" + statusSuffix;
   }
 
   function updatePcaGuidance() {
@@ -715,6 +774,8 @@
   function syncControlsFromState() {
     overlayEnabled.checked = state.overlay.enabled;
     overlayMode.value = state.overlay.mode;
+    overlayFlagColor.value = sanitizeHexColor(state.overlay.flagColor, DEFAULT_FLAG_OVERLAY_COLOR);
+    overlayFlagColor.disabled = state.overlay.mode !== "flag";
     comparisonMode.value = state.comparison.mode;
 
     metricAudio.checked = state.metrics.audio;
@@ -771,6 +832,279 @@
       return error.message;
     }
     return String(error);
+  }
+
+  function splitCsvLine(line) {
+    return line.split(",").map(function (value) {
+      return value.trim();
+    });
+  }
+
+  function normalizeColumnName(name) {
+    return name.trim().toLowerCase();
+  }
+
+  function parseFlagValue(raw) {
+    const normalized = String(raw).trim().toLowerCase();
+    if (!normalized) {
+      return false;
+    }
+
+    if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "y") {
+      return true;
+    }
+
+    if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "n") {
+      return false;
+    }
+
+    const numeric = Number(normalized);
+    return Number.isFinite(numeric) ? numeric !== 0 : false;
+  }
+
+  function estimateFlagStepSeconds(sortedTimes) {
+    const diffs = [];
+    for (let index = 1; index < sortedTimes.length; index += 1) {
+      const delta = sortedTimes[index] - sortedTimes[index - 1];
+      if (Number.isFinite(delta) && delta > 0) {
+        diffs.push(delta);
+      }
+    }
+
+    if (diffs.length > 0) {
+      diffs.sort(function (a, b) {
+        return a - b;
+      });
+      return diffs[Math.floor(diffs.length / 2)];
+    }
+
+    if (primaryAudio && primaryAudio.sampleRate > 0) {
+      return 1 / primaryAudio.sampleRate;
+    }
+
+    return 0.01;
+  }
+
+  function mergeIntervals(intervals) {
+    if (intervals.length === 0) {
+      return [];
+    }
+
+    const sorted = intervals
+      .map(function (interval) {
+        return {
+          startSec: Math.min(interval.startSec, interval.endSec),
+          endSec: Math.max(interval.startSec, interval.endSec)
+        };
+      })
+      .filter(function (interval) {
+        return Number.isFinite(interval.startSec) && Number.isFinite(interval.endSec);
+      })
+      .sort(function (a, b) {
+        return a.startSec - b.startSec;
+      });
+
+    if (sorted.length === 0) {
+      return [];
+    }
+
+    const merged = [sorted[0]];
+    for (let index = 1; index < sorted.length; index += 1) {
+      const current = sorted[index];
+      const last = merged[merged.length - 1];
+      if (current.startSec <= last.endSec + 1e-9) {
+        last.endSec = Math.max(last.endSec, current.endSec);
+      } else {
+        merged.push(current);
+      }
+    }
+
+    return merged;
+  }
+
+  function convertCsvTimeToSeconds(value, columnName) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      throw new Error("Invalid numeric value in column " + columnName + ": " + value);
+    }
+
+    if (numeric < 0) {
+      return 0;
+    }
+
+    if (primaryAudio && primaryAudio.sampleRate > 0 && primaryAudio.duration > 0) {
+      if (numeric > primaryAudio.duration * 1.5) {
+        return numeric / primaryAudio.sampleRate;
+      }
+    }
+
+    return numeric;
+  }
+
+  function parseOverlayCsvTable(csvText) {
+    const rawLines = csvText.split(/\r?\n/);
+    const lines = rawLines
+      .map(function (line) {
+        return line.trim();
+      })
+      .filter(function (line) {
+        return line && !line.startsWith("#");
+      });
+
+    if (lines.length === 0) {
+      throw new Error("CSV is empty.");
+    }
+
+    const headerColumns = splitCsvLine(lines[0]).map(normalizeColumnName);
+    if (headerColumns.length === 0) {
+      throw new Error("CSV header is empty.");
+    }
+
+    const columnIndexByName = Object.create(null);
+    headerColumns.forEach(function (name, index) {
+      if (!(name in columnIndexByName)) {
+        columnIndexByName[name] = index;
+      }
+    });
+
+    const rows = lines.slice(1).map(function (line, rowIndex) {
+      const values = splitCsvLine(line);
+      return {
+        lineNumber: rowIndex + 2,
+        values
+      };
+    });
+
+    return {
+      columnIndexByName,
+      rows
+    };
+  }
+
+  function parseOverlayCsvText(csvText, mode) {
+    const table = parseOverlayCsvTable(csvText);
+
+    if (mode === "flag") {
+      if (!("t" in table.columnIndexByName) || !("flag" in table.columnIndexByName)) {
+        throw new Error("Flag mode requires columns: t,flag");
+      }
+
+      const tIndex = table.columnIndexByName.t;
+      const flagIndex = table.columnIndexByName.flag;
+      const flaggedTimes = [];
+      let activeRows = 0;
+
+      table.rows.forEach(function (row) {
+        const tRaw = row.values[tIndex];
+        const flagRaw = row.values[flagIndex];
+        if (tRaw === undefined || flagRaw === undefined) {
+          throw new Error("Missing value on line " + row.lineNumber);
+        }
+
+        if (parseFlagValue(flagRaw)) {
+          activeRows += 1;
+          flaggedTimes.push(convertCsvTimeToSeconds(tRaw, "t"));
+        }
+      });
+
+      flaggedTimes.sort(function (a, b) {
+        return a - b;
+      });
+
+      const step = estimateFlagStepSeconds(flaggedTimes);
+      const halfStep = Math.max(1e-6, step / 2);
+      const intervals = mergeIntervals(
+        flaggedTimes.map(function (timeSec) {
+          return {
+            startSec: Math.max(0, timeSec - halfStep),
+            endSec: timeSec + halfStep
+          };
+        })
+      );
+
+      return {
+        mode,
+        intervals,
+        activeRows,
+        totalRows: table.rows.length
+      };
+    }
+
+    if (!("flag" in table.columnIndexByName) || !("t_start" in table.columnIndexByName) || !("t_end" in table.columnIndexByName)) {
+      throw new Error("Timestamped mode requires columns: flag,t_start,t_end");
+    }
+
+    const flagIndex = table.columnIndexByName.flag;
+    const startIndex = table.columnIndexByName.t_start;
+    const endIndex = table.columnIndexByName.t_end;
+    const intervals = [];
+    let activeRows = 0;
+
+    table.rows.forEach(function (row) {
+      const flagRaw = row.values[flagIndex];
+      const startRaw = row.values[startIndex];
+      const endRaw = row.values[endIndex];
+      if (flagRaw === undefined || startRaw === undefined || endRaw === undefined) {
+        throw new Error("Missing value on line " + row.lineNumber);
+      }
+
+      if (!parseFlagValue(flagRaw)) {
+        return;
+      }
+
+      activeRows += 1;
+      intervals.push({
+        startSec: convertCsvTimeToSeconds(startRaw, "t_start"),
+        endSec: convertCsvTimeToSeconds(endRaw, "t_end")
+      });
+    });
+
+    return {
+      mode,
+      intervals: mergeIntervals(intervals),
+      activeRows,
+      totalRows: table.rows.length
+    };
+  }
+
+  async function parseOverlayCsvFromInputFile(file) {
+    if (!file) {
+      overlayParsed = null;
+      overlayStatusMessage = "";
+      updateOverlayCsvHint();
+      renderTransformStack();
+      return;
+    }
+
+    try {
+      const csvText = await file.text();
+      overlayParsed = parseOverlayCsvText(csvText, state.overlay.mode);
+      overlayStatusMessage =
+        "Loaded " +
+        overlayParsed.intervals.length +
+        " intervals (" +
+        overlayParsed.activeRows +
+        "/" +
+        overlayParsed.totalRows +
+        " active rows) from " +
+        file.name +
+        ".";
+    } catch (error) {
+      overlayParsed = null;
+      overlayStatusMessage = "Invalid CSV: " + toErrorText(error);
+    }
+
+    updateOverlayCsvHint();
+    renderTransformStack();
+  }
+
+  async function reparseOverlayCsvIfPresent() {
+    const file = overlayCsv.files && overlayCsv.files[0] ? overlayCsv.files[0] : null;
+    if (!file) {
+      return;
+    }
+
+    await parseOverlayCsvFromInputFile(file);
   }
 
   function swapStackItems(fromIndex, toIndex) {
@@ -979,6 +1313,7 @@
         " s"
     );
 
+    void reparseOverlayCsvIfPresent();
     renderTransformStack();
     postState();
   }
@@ -998,6 +1333,7 @@
     syncTransformParamControls();
     setAudioStatus("Loaded " + sourceName + " (playback only). " + reason);
 
+    void reparseOverlayCsvIfPresent();
     renderTransformStack();
     postState();
   }
@@ -1917,6 +2253,60 @@
 
     ctx.strokeStyle = "rgba(255,255,255,0.20)";
     ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
+  }
+
+  function drawActivationOverlay(canvas, renderSpec, windowInfo) {
+    if (!state.overlay.enabled || !overlayParsed || !Array.isArray(overlayParsed.intervals)) {
+      return;
+    }
+
+    if (!Number.isFinite(renderSpec.durationSeconds) || renderSpec.durationSeconds <= 0) {
+      return;
+    }
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+
+    const domainLastIndex = Math.max(1, renderSpec.domainLength - 1);
+    const visibleLastIndex = Math.max(1, windowInfo.visibleCount - 1);
+    const duration = renderSpec.durationSeconds;
+
+    ctx.save();
+    if (overlayParsed.mode === "timestamped") {
+      ctx.fillStyle = "rgba(244, 63, 94, 0.20)";
+      ctx.strokeStyle = "rgba(251, 113, 133, 0.85)";
+    } else {
+      const overlayColor = hexToRgb(state.overlay.flagColor);
+      ctx.fillStyle = rgbToRgbaString(overlayColor, 0.2);
+      ctx.strokeStyle = rgbToRgbaString(overlayColor, 0.9);
+    }
+    ctx.lineWidth = 1;
+
+    overlayParsed.intervals.forEach(function (interval) {
+      const startSec = clamp(interval.startSec, 0, duration);
+      const endSec = clamp(interval.endSec, startSec, duration);
+
+      const startGlobal = (startSec / duration) * domainLastIndex;
+      const endGlobal = (endSec / duration) * domainLastIndex;
+
+      const localStartRatio = (startGlobal - windowInfo.startIndex) / visibleLastIndex;
+      const localEndRatio = (endGlobal - windowInfo.startIndex) / visibleLastIndex;
+
+      if (localEndRatio < 0 || localStartRatio > 1) {
+        return;
+      }
+
+      const x1 = clamp(localStartRatio, 0, 1) * (canvas.width - 1);
+      const x2 = clamp(localEndRatio, 0, 1) * (canvas.width - 1);
+      const width = Math.max(1.5, x2 - x1);
+
+      ctx.fillRect(x1, 1, width, canvas.height - 2);
+      ctx.strokeRect(x1 + 0.5, 1.5, Math.max(1, width - 1), canvas.height - 3);
+    });
+
+    ctx.restore();
   }
 
   function resolveMatrixRange(matrix, startFrame, endFrame, fixedRange) {
@@ -2860,6 +3250,8 @@
           );
         }
 
+        drawActivationOverlay(canvas, renderSpec, windowInfo);
+
         attachCanvasInteractions(canvas, item, renderSpec);
 
         const viewportPlayhead = document.createElement("div");
@@ -3020,18 +3412,31 @@
 
   overlayEnabled.addEventListener("change", function () {
     state.overlay.enabled = overlayEnabled.checked;
+    renderTransformStack();
     postState();
   });
 
   overlayMode.addEventListener("change", function () {
     state.overlay.mode = overlayMode.value;
-    updateOverlayCsvHint();
+    overlayFlagColor.disabled = state.overlay.mode !== "flag";
+    void reparseOverlayCsvIfPresent().finally(function () {
+      updateOverlayCsvHint();
+    });
+    renderTransformStack();
     postState();
   });
 
   overlayCsv.addEventListener("change", function () {
     const file = overlayCsv.files && overlayCsv.files[0] ? overlayCsv.files[0] : null;
     state.overlay.csvName = file ? file.name : null;
+    void parseOverlayCsvFromInputFile(file);
+    postState();
+  });
+
+  overlayFlagColor.addEventListener("input", function () {
+    state.overlay.flagColor = sanitizeHexColor(overlayFlagColor.value, DEFAULT_FLAG_OVERLAY_COLOR);
+    overlayFlagColor.value = state.overlay.flagColor;
+    renderTransformStack();
     postState();
   });
 

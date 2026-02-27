@@ -46,6 +46,7 @@ export interface WorkbenchState {
     enabled: boolean;
     mode: ActivationOverlayMode;
     csvName: string | null;
+    flagColor: string;
   };
   comparison: {
     mode: ComparisonMode;
@@ -137,7 +138,8 @@ export function createDefaultWorkbenchState(): WorkbenchState {
     overlay: {
       enabled: false,
       mode: "flag",
-      csvName: null
+      csvName: null,
+      flagColor: "#ef4444"
     },
     comparison: {
       mode: "none",

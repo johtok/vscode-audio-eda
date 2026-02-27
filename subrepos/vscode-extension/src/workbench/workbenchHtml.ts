@@ -81,6 +81,8 @@ export function buildWorkbenchHtml(
         </select>
         <label class="row" for="overlay-csv">Activation CSV</label>
         <input id="overlay-csv" type="file" accept=".csv" />
+        <label class="row" for="overlay-flag-color">Flag highlight color</label>
+        <input id="overlay-flag-color" type="color" value="#ef4444" />
         <p id="overlay-csv-hint" class="hint"></p>
 
         <h2>Comparison</h2>
