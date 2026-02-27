@@ -21,6 +21,7 @@
 
 - [ ] `audio-eda inspect <path> --json`
 - [ ] `audio-eda summarize <dir> --json`
+- [x] `audio-eda r-cluster <features.csv> --k <int> --json`
 - [ ] `audio-eda plot <path> --out-dir <dir>`
 - [ ] `audio-eda schema` (print JSON schema version)
 

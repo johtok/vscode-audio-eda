@@ -149,6 +149,8 @@ Delivery slices:
 
 Goal: add representation-aware clustering diagnostics inspired by r-Clustering for robust structure discovery.
 
+Status: `in progress` (toolbox `r-cluster` command and diagnostics contract added; extension UI integration pending).
+
 Reference:
 
 - https://arxiv.org/html/2305.10457

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from audio_eda_toolbox.castor import run_castor_prototype
+from audio_eda_toolbox.r_clustering import run_r_clustering
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,6 +53,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     castor_parser.add_argument("--json", action="store_true", dest="as_json")
 
+    r_cluster_parser = subparsers.add_parser(
+        "r-cluster",
+        help="Run representation-aware clustering diagnostics on a feature CSV",
+    )
+    r_cluster_parser.add_argument("feature_csv", type=Path)
+    r_cluster_parser.add_argument("--k", type=int, default=2)
+    r_cluster_parser.add_argument("--seed", type=int, default=0)
+    r_cluster_parser.add_argument("--max-iter", type=int, default=64)
+    r_cluster_parser.add_argument("--stability-runs", type=int, default=16)
+    r_cluster_parser.add_argument("--row-ratio", type=float, default=0.8)
+    r_cluster_parser.add_argument("--feature-ratio", type=float, default=0.8)
+    r_cluster_parser.add_argument("--labels-csv", type=Path, default=None)
+    r_cluster_parser.add_argument("--json", action="store_true", dest="as_json")
+
     subparsers.add_parser("schema", help="Show toolbox schema version")
     return parser
 
@@ -88,6 +103,17 @@ def main() -> None:
             pad_length=args.pad_length,
             pad_value=args.pad_value,
             normalize=not args.no_normalize,
+        )
+    elif args.command == "r-cluster":
+        payload = run_r_clustering(
+            feature_csv=args.feature_csv,
+            k=args.k,
+            seed=args.seed,
+            max_iter=args.max_iter,
+            stability_runs=args.stability_runs,
+            row_ratio=args.row_ratio,
+            feature_ratio=args.feature_ratio,
+            labels_csv=args.labels_csv,
         )
     else:
         parser.error(f"Unsupported command: {args.command}")
