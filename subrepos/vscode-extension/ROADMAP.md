@@ -137,6 +137,8 @@ Delivery slices:
 
 Goal: PCA diagnostics stratified by class.
 
+Status: `implemented` (overlay-derived active/inactive classwise PCA summaries, per-class explained variance, and separation indicators).
+
 Delivery slices:
 
 1. per-class PCA model option

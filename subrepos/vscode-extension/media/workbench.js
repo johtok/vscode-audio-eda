@@ -4790,6 +4790,8 @@
     const powerFrames = [];
     const logMagnitudeFrames = [];
     const phaseFrames = [];
+    const frameSampleOffsets = [];
+    const frameTimesSeconds = [];
 
     for (let frame = 0; frame < totalFrames; frame += frameStride) {
       const offset = frame * safeHopSize;
@@ -4819,6 +4821,8 @@
       powerFrames.push(power);
       logMagnitudeFrames.push(logMagnitude);
       phaseFrames.push(phase);
+      frameSampleOffsets.push(offset);
+      frameTimesSeconds.push((offset + fftSize * 0.5) / Math.max(1, sampleRate));
     }
 
     return {
@@ -4830,7 +4834,10 @@
       durationSeconds: samples.length / sampleRate,
       powerFrames,
       logMagnitudeFrames,
-      phaseFrames
+      phaseFrames,
+      frameStride,
+      frameSampleOffsets,
+      frameTimesSeconds
     };
   }
 
@@ -5342,6 +5349,7 @@
     const totalFrames = Math.max(1, Math.floor((Math.max(samples.length, lag) - lag) / hop) + 1);
     const frameStride = Math.max(1, Math.floor(totalFrames / MAX_PCA_FRAMES));
     const rows = [];
+    const rowTimesSeconds = [];
 
     for (let frame = 0; frame < totalFrames; frame += frameStride) {
       const offset = frame * hop;
@@ -5358,19 +5366,22 @@
         row[index] = (row[index] - mean) * window[index];
       }
       rows.push(lag > targetFeatures ? resampleVectorToLength(row, targetFeatures) : row);
+      rowTimesSeconds.push((offset + lag * 0.5) / safeSampleRate);
     }
 
     return {
       rows,
+      rowTimesSeconds,
       sourceDescription: "SSA lag-embedded waveform windows (" + lag + " samples).",
       sourceNote: "Lag embedding approximates SSA-style PCA for denoising/structure analysis."
     };
   }
 
-  function preparePcaInputRows(rawRows) {
+  function preparePcaInputRows(rawRows, rawRowTimesSeconds) {
     if (!Array.isArray(rawRows) || rawRows.length === 0) {
       return {
         rows: [],
+        rowTimesSeconds: [],
         rowStride: 1,
         originalRowCount: 0,
         originalColCount: 0,
@@ -5383,6 +5394,7 @@
     if (!sourceColCount) {
       return {
         rows: [],
+        rowTimesSeconds: [],
         rowStride: 1,
         originalRowCount: rawRows.length,
         originalColCount: 0,
@@ -5393,6 +5405,7 @@
     const rowStride = Math.max(1, Math.floor(rawRows.length / MAX_PCA_FRAMES));
     const targetColCount = Math.min(MAX_PCA_FEATURES, sourceColCount);
     const preparedRows = [];
+    const preparedRowTimesSeconds = [];
 
     for (let rowIndex = 0; rowIndex < rawRows.length; rowIndex += rowStride) {
       const source = rawRows[rowIndex];
@@ -5413,14 +5426,274 @@
         row.set(source);
       }
       preparedRows.push(row);
+
+      if (Array.isArray(rawRowTimesSeconds) && rowIndex < rawRowTimesSeconds.length) {
+        const rowTimeSeconds = Number(rawRowTimesSeconds[rowIndex]);
+        if (Number.isFinite(rowTimeSeconds)) {
+          preparedRowTimesSeconds.push(rowTimeSeconds);
+          continue;
+        }
+      }
+      preparedRowTimesSeconds.push(rowIndex);
     }
 
     return {
       rows: preparedRows,
+      rowTimesSeconds: preparedRowTimesSeconds,
       rowStride,
       originalRowCount: rawRows.length,
       originalColCount: sourceColCount,
       colCount: preparedRows.length ? preparedRows[0].length : 0
+    };
+  }
+
+  function summarizeExplainedRatios(explainedRatios) {
+    if (!Array.isArray(explainedRatios) || explainedRatios.length === 0) {
+      return "n/a";
+    }
+
+    return explainedRatios
+      .map(function (value, index) {
+        return "PC" + (index + 1) + "=" + formatMetricPercent(value);
+      })
+      .join(", ");
+  }
+
+  function buildClassLabelsFromRowTimes(rowTimesSeconds, intervals) {
+    if (!Array.isArray(rowTimesSeconds) || rowTimesSeconds.length === 0) {
+      return null;
+    }
+    if (!Array.isArray(intervals) || intervals.length === 0) {
+      return null;
+    }
+
+    const labels = new Uint8Array(rowTimesSeconds.length);
+    let activeCount = 0;
+    let intervalIndex = 0;
+
+    for (let rowIndex = 0; rowIndex < rowTimesSeconds.length; rowIndex += 1) {
+      const timeSeconds = Number(rowTimesSeconds[rowIndex]);
+      if (!Number.isFinite(timeSeconds)) {
+        continue;
+      }
+
+      while (
+        intervalIndex < intervals.length &&
+        Number.isFinite(intervals[intervalIndex].endSec) &&
+        intervals[intervalIndex].endSec < timeSeconds - 1e-9
+      ) {
+        intervalIndex += 1;
+      }
+
+      if (intervalIndex >= intervals.length) {
+        continue;
+      }
+
+      const interval = intervals[intervalIndex];
+      if (
+        Number.isFinite(interval.startSec) &&
+        Number.isFinite(interval.endSec) &&
+        interval.startSec <= timeSeconds + 1e-9 &&
+        interval.endSec >= timeSeconds - 1e-9
+      ) {
+        labels[rowIndex] = 1;
+        activeCount += 1;
+      }
+    }
+
+    return {
+      labels,
+      activeCount,
+      inactiveCount: rowTimesSeconds.length - activeCount
+    };
+  }
+
+  function splitRowsByClass(rows, labels) {
+    const activeRows = [];
+    const inactiveRows = [];
+    const activeIndices = [];
+    const inactiveIndices = [];
+
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+      if (labels[rowIndex]) {
+        activeRows.push(rows[rowIndex]);
+        activeIndices.push(rowIndex);
+      } else {
+        inactiveRows.push(rows[rowIndex]);
+        inactiveIndices.push(rowIndex);
+      }
+    }
+
+    return { activeRows, inactiveRows, activeIndices, inactiveIndices };
+  }
+
+  function summarizeProjectionDistance(projectionMatrix, activeIndices, inactiveIndices, componentCount) {
+    if (
+      !Array.isArray(projectionMatrix) ||
+      activeIndices.length === 0 ||
+      inactiveIndices.length === 0 ||
+      componentCount <= 0
+    ) {
+      return null;
+    }
+
+    const dims = Math.max(1, Math.min(componentCount, 3));
+    const activeMean = new Float64Array(dims);
+    const inactiveMean = new Float64Array(dims);
+
+    for (let index = 0; index < activeIndices.length; index += 1) {
+      const row = projectionMatrix[activeIndices[index]];
+      if (!row) {
+        continue;
+      }
+      for (let dim = 0; dim < dims; dim += 1) {
+        activeMean[dim] += row[dim] || 0;
+      }
+    }
+    for (let dim = 0; dim < dims; dim += 1) {
+      activeMean[dim] /= Math.max(1, activeIndices.length);
+    }
+
+    for (let index = 0; index < inactiveIndices.length; index += 1) {
+      const row = projectionMatrix[inactiveIndices[index]];
+      if (!row) {
+        continue;
+      }
+      for (let dim = 0; dim < dims; dim += 1) {
+        inactiveMean[dim] += row[dim] || 0;
+      }
+    }
+    for (let dim = 0; dim < dims; dim += 1) {
+      inactiveMean[dim] /= Math.max(1, inactiveIndices.length);
+    }
+
+    let centroidDistanceSquared = 0;
+    for (let dim = 0; dim < dims; dim += 1) {
+      const delta = activeMean[dim] - inactiveMean[dim];
+      centroidDistanceSquared += delta * delta;
+    }
+
+    const fisherByComponent = [];
+    const fisherLimit = Math.min(componentCount, 3);
+    for (let componentIndex = 0; componentIndex < fisherLimit; componentIndex += 1) {
+      const meanActive = activeMean[Math.min(componentIndex, dims - 1)] || 0;
+      const meanInactive = inactiveMean[Math.min(componentIndex, dims - 1)] || 0;
+
+      let activeVar = 0;
+      for (let index = 0; index < activeIndices.length; index += 1) {
+        const row = projectionMatrix[activeIndices[index]];
+        if (!row) {
+          continue;
+        }
+        const delta = (row[componentIndex] || 0) - meanActive;
+        activeVar += delta * delta;
+      }
+      activeVar /= Math.max(1, activeIndices.length - 1);
+
+      let inactiveVar = 0;
+      for (let index = 0; index < inactiveIndices.length; index += 1) {
+        const row = projectionMatrix[inactiveIndices[index]];
+        if (!row) {
+          continue;
+        }
+        const delta = (row[componentIndex] || 0) - meanInactive;
+        inactiveVar += delta * delta;
+      }
+      inactiveVar /= Math.max(1, inactiveIndices.length - 1);
+
+      const meanDelta = meanActive - meanInactive;
+      fisherByComponent.push((meanDelta * meanDelta) / (activeVar + inactiveVar + 1e-12));
+    }
+
+    return {
+      dims,
+      centroidDistance: Math.sqrt(Math.max(0, centroidDistanceSquared)),
+      fisherByComponent
+    };
+  }
+
+  function computeClasswisePcaSummary(rows, rowTimesSeconds, projectionMatrix, componentCount) {
+    if (!state.pca.classwise) {
+      return {
+        available: false,
+        reason: "Classwise PCA disabled."
+      };
+    }
+
+    if (!state.overlay.enabled) {
+      return {
+        available: false,
+        reason: "Enable Activation Overlay and load CSV labels to run classwise PCA."
+      };
+    }
+
+    if (!overlayParsed || !Array.isArray(overlayParsed.intervals) || overlayParsed.intervals.length === 0) {
+      return {
+        available: false,
+        reason: "Load a valid overlay CSV to derive active/inactive classes for PCA."
+      };
+    }
+
+    const labelsSummary = buildClassLabelsFromRowTimes(rowTimesSeconds, overlayParsed.intervals);
+    if (!labelsSummary) {
+      return {
+        available: false,
+        reason: "Unable to map PCA rows to overlay intervals."
+      };
+    }
+
+    const split = splitRowsByClass(rows, labelsSummary.labels);
+    if (split.activeRows.length < 2 || split.inactiveRows.length < 2) {
+      return {
+        available: false,
+        reason:
+          "Need at least 2 PCA rows per class. Active=" +
+          split.activeRows.length +
+          ", inactive=" +
+          split.inactiveRows.length +
+          "."
+      };
+    }
+
+    const maxClassComponents = Math.min(MAX_PCA_COMPONENTS, rows[0] ? rows[0].length : 2);
+    const activePca = computePcaProjection(split.activeRows, maxClassComponents);
+    const inactivePca = computePcaProjection(split.inactiveRows, maxClassComponents);
+    const separation = summarizeProjectionDistance(
+      projectionMatrix,
+      split.activeIndices,
+      split.inactiveIndices,
+      componentCount
+    );
+
+    return {
+      available: true,
+      mode: overlayParsed.mode,
+      activeRows: split.activeRows.length,
+      inactiveRows: split.inactiveRows.length,
+      totalRows: rows.length,
+      activeRatio: split.activeRows.length / Math.max(1, rows.length),
+      source: {
+        intervals: overlayParsed.intervals.length,
+        activeRows: overlayParsed.activeRows,
+        totalRows: overlayParsed.totalRows
+      },
+      activeModel: {
+        componentCount: activePca.componentCount,
+        explainedRatios: activePca.explainedRatios,
+        explainedSummary: summarizeExplainedRatios(activePca.explainedRatios)
+      },
+      inactiveModel: {
+        componentCount: inactivePca.componentCount,
+        explainedRatios: inactivePca.explainedRatios,
+        explainedSummary: summarizeExplainedRatios(inactivePca.explainedRatios)
+      },
+      separation,
+      status:
+        "Computed classwise PCA with " +
+        split.activeRows.length +
+        " active and " +
+        split.inactiveRows.length +
+        " inactive rows."
     };
   }
 
@@ -5693,12 +5966,15 @@
     const goal = state.pca.goal;
     const stftDefaults = getDefaultStftParams();
     const melDefaults = getDefaultMelParams(audioData.sampleRate || 16000);
+    const classwiseCacheKey = state.pca.classwise ? getClasswiseMetricsCacheKeyPart() : "off";
     const cacheKey =
       getAudioCachePrefix(audioData) +
       "::pca::" +
       goal +
       "::" +
       state.pca.classwise +
+      "::" +
+      classwiseCacheKey +
       "::" +
       stftParamsToKey(stftDefaults) +
       "::" +
@@ -5709,6 +5985,7 @@
     }
 
     let sourceRows = [];
+    let sourceRowTimesSeconds = [];
     let sourceDescription = "";
     let sourceNote = "";
     let spectrumAxisLabel = "Feature bin";
@@ -5721,6 +5998,7 @@
     if (goal === "denoising") {
       const ssa = buildSsaFeatureRows(audioData.samples, audioData.sampleRate);
       sourceRows = ssa.rows;
+      sourceRowTimesSeconds = ssa.rowTimesSeconds;
       sourceDescription = ssa.sourceDescription;
       sourceNote = ssa.sourceNote;
       spectrumAxisLabel = "Lag bin";
@@ -5732,6 +6010,9 @@
       const mel = ensureMelForAudio(melItem, audioData, cache);
       const stft = ensureStftForAudio(melItem, audioData, cache);
       sourceRows = mel.matrix;
+      sourceRowTimesSeconds = Array.isArray(stft.frameTimesSeconds)
+        ? stft.frameTimesSeconds
+        : [];
       durationSeconds = mel.durationSeconds;
       sourceDescription =
         "Log-mel spectra (" +
@@ -5757,19 +6038,23 @@
       }
     }
 
-    const prepared = preparePcaInputRows(sourceRows);
+    const prepared = preparePcaInputRows(sourceRows, sourceRowTimesSeconds);
     if (prepared.rows.length < 2 || prepared.colCount < 2) {
       throw new Error("Not enough frames/features for PCA. Increase analysis window or load longer audio.");
     }
 
     const pca = computePcaProjection(prepared.rows, MAX_PCA_COMPONENTS);
-    const explainedSummary = pca.explainedRatios
-      .map(function (value, index) {
-        return "PC" + (index + 1) + "=" + formatMetricPercent(value);
-      })
-      .join(", ");
+    const explainedSummary = summarizeExplainedRatios(pca.explainedRatios);
+    const classwise = computeClasswisePcaSummary(
+      prepared.rows,
+      prepared.rowTimesSeconds,
+      pca.projectionMatrix,
+      pca.componentCount
+    );
     const classwiseNote = state.pca.classwise
-      ? "Classwise PCA requested; labels are unavailable, showing global PCA."
+      ? classwise.available
+        ? classwise.status
+        : classwise.reason
       : "";
     const notes = [sourceNote, classwiseNote].filter(Boolean).join(" ");
 
@@ -5845,7 +6130,8 @@
       componentVectors: pca.componentVectors,
       componentMelLoadings,
       componentMagnitudeLoadings,
-      componentTimeVectors
+      componentTimeVectors,
+      classwise
     };
 
     cache.pcaByKey[cacheKey] = result;
@@ -6181,9 +6467,29 @@
         pcaView.originalCols +
         "."
     ];
+    if (state.pca.classwise) {
+      const classwiseSummary =
+        pcaView.classwise && pcaView.classwise.available
+          ? pcaView.classwise.status
+          : pcaView.classwise && pcaView.classwise.reason
+            ? pcaView.classwise.reason
+            : "Classwise PCA unavailable.";
+      captionParts.push("Classwise PCA: " + classwiseSummary);
+    }
     if (pcaView.note) {
       captionParts.push(pcaView.note);
     }
+
+    const classwiseMeta =
+      state.pca.classwise && pcaView.classwise
+        ? pcaView.classwise.available
+          ? "classwise=on(active=" +
+            pcaView.classwise.activeRows +
+            ",inactive=" +
+            pcaView.classwise.inactiveRows +
+            ")"
+          : "classwise=on(unavailable)"
+        : "classwise=off";
 
     return {
       type: "matrix",
@@ -6198,7 +6504,9 @@
         " | comps=" +
         pcaView.componentCount +
         " | " +
-        pcaView.explainedSummary
+        pcaView.explainedSummary +
+        " | " +
+        classwiseMeta
       };
   }
 
@@ -6426,6 +6734,81 @@
       warning.textContent =
         "Ignored invalid component tokens: " + parsed.invalidTokens.join(", ") + ".";
       panel.appendChild(warning);
+    }
+
+    if (state.pca.classwise) {
+      if (pcaView.classwise && pcaView.classwise.available) {
+        const classwiseRows = [
+          ["Mode", pcaView.classwise.mode],
+          [
+            "Rows (active/inactive)",
+            String(pcaView.classwise.activeRows) + " / " + String(pcaView.classwise.inactiveRows)
+          ],
+          ["Active ratio", formatMetricPercent(pcaView.classwise.activeRatio)],
+          [
+            "Overlay rows",
+            String(pcaView.classwise.source.activeRows) +
+              " / " +
+              String(pcaView.classwise.source.totalRows)
+          ],
+          ["Overlay intervals", String(pcaView.classwise.source.intervals)],
+          ["Status", pcaView.classwise.status]
+        ];
+        panel.appendChild(createMetricsGroup("Classwise PCA", classwiseRows));
+
+        panel.appendChild(
+          createMetricsGroup("Classwise PCA Models", [
+            [
+              "Active model",
+              "k=" +
+                pcaView.classwise.activeModel.componentCount +
+                " | " +
+                pcaView.classwise.activeModel.explainedSummary
+            ],
+            [
+              "Inactive model",
+              "k=" +
+                pcaView.classwise.inactiveModel.componentCount +
+                " | " +
+                pcaView.classwise.inactiveModel.explainedSummary
+            ]
+          ])
+        );
+
+        if (pcaView.classwise.separation) {
+          panel.appendChild(
+            createMetricsGroup("Class Separation", [
+              [
+                "Centroid distance (PC1-PC" + pcaView.classwise.separation.dims + ")",
+                formatMetricNumber(pcaView.classwise.separation.centroidDistance, 4)
+              ],
+              [
+                "Fisher score PC1",
+                formatMetricNumber(pcaView.classwise.separation.fisherByComponent[0] || 0, 4)
+              ],
+              [
+                "Fisher score PC2",
+                formatMetricNumber(pcaView.classwise.separation.fisherByComponent[1] || 0, 4)
+              ],
+              [
+                "Fisher score PC3",
+                formatMetricNumber(pcaView.classwise.separation.fisherByComponent[2] || 0, 4)
+              ]
+            ])
+          );
+        }
+      } else {
+        panel.appendChild(
+          createMetricsGroup("Classwise PCA", [
+            [
+              "Status",
+              pcaView.classwise && pcaView.classwise.reason
+                ? pcaView.classwise.reason
+                : "Unavailable."
+            ]
+          ])
+        );
+      }
     }
 
     const grid = document.createElement("div");

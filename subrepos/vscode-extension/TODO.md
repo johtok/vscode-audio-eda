@@ -17,7 +17,7 @@ Immediate tasks after template generation:
 - [ ] Integrate feature computations (power/autocorrelation + short-time variants)
 - [ ] Add PCA backend API and PCA visualization widgets
 - [ ] Add channelwise split rendering for multichannel files
-- [ ] Add classwise metrics and classwise PCA tabs
+- [x] Add classwise metrics and classwise PCA tabs
 - [ ] Add tests for command handlers + state serialization
 
 See `ROADMAP.md` for the full prioritized feature plan.
