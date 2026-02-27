@@ -1,0 +1,216 @@
+{
+  "name": "audio-eda-vscode",
+  "displayName": "Audio EDA Workbench",
+  "description": "VS Code extension for audio EDA and ML dataset diagnostics",
+  "version": "0.1.0",
+  "publisher": "local-dev",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other",
+    "Data Science"
+  ],
+  "keywords": [
+    "audio",
+    "eda",
+    "signal processing",
+    "spectrogram",
+    "machine learning"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:audioEdaSidebar",
+    "onCustomEditor:audioEda.editor",
+    "onCommand:audioEda.openWorkbench",
+    "onCommand:audioEda.openPresetWorkspace",
+    "onCommand:audioEda.openPresetTransforms",
+    "onCommand:audioEda.openPresetMetrics",
+    "onCommand:audioEda.openPresetPca",
+    "onCommand:audioEda.openWorkbenchForFile",
+    "onCommand:audioEda.reopenActiveWithAudioEda",
+    "onCommand:audioEda.toggleAutoOpenOnFocus",
+    "onCommand:audioEda.openExtensionSettings",
+    "onCommand:audioEda.inspectFile",
+    "onCommand:audioEda.summarizeFolder"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "audioEda.openWorkbench",
+        "title": "Audio EDA: Open Workbench"
+      },
+      {
+        "command": "audioEda.openPresetWorkspace",
+        "title": "Audio EDA: Open General Workspace Preset"
+      },
+      {
+        "command": "audioEda.openPresetTransforms",
+        "title": "Audio EDA: Open Transform Lab Preset"
+      },
+      {
+        "command": "audioEda.openPresetMetrics",
+        "title": "Audio EDA: Open Metrics Preset"
+      },
+      {
+        "command": "audioEda.openPresetPca",
+        "title": "Audio EDA: Open PCA Preset"
+      },
+      {
+        "command": "audioEda.openWorkbenchForFile",
+        "title": "Audio EDA: Open Workspace For Audio File"
+      },
+      {
+        "command": "audioEda.reopenActiveWithAudioEda",
+        "title": "Audio EDA: Reopen Active Editor With Audio EDA"
+      },
+      {
+        "command": "audioEda.toggleAutoOpenOnFocus",
+        "title": "Audio EDA: Toggle Auto-Open On Audio Focus"
+      },
+      {
+        "command": "audioEda.openExtensionSettings",
+        "title": "Audio EDA: Open Extension Settings"
+      },
+      {
+        "command": "audioEda.inspectFile",
+        "title": "Audio EDA: Open Workspace From Active File"
+      },
+      {
+        "command": "audioEda.summarizeFolder",
+        "title": "Audio EDA: Summarize Folder"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "audioEda.openWorkbenchForFile",
+          "when": "!explorerResourceIsFolder",
+          "group": "navigation@10"
+        },
+        {
+          "command": "audioEda.summarizeFolder",
+          "when": "explorerResourceIsFolder",
+          "group": "navigation@11"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "audioEda.openPresetWorkspace",
+          "when": "view == audioEdaSidebar",
+          "group": "navigation@1"
+        },
+        {
+          "command": "audioEda.openPresetTransforms",
+          "when": "view == audioEdaSidebar",
+          "group": "navigation@2"
+        },
+        {
+          "command": "audioEda.openPresetMetrics",
+          "when": "view == audioEdaSidebar",
+          "group": "navigation@3"
+        },
+        {
+          "command": "audioEda.openPresetPca",
+          "when": "view == audioEdaSidebar",
+          "group": "navigation@4"
+        },
+        {
+          "command": "audioEda.toggleAutoOpenOnFocus",
+          "when": "view == audioEdaSidebar",
+          "group": "navigation@5"
+        },
+        {
+          "command": "audioEda.reopenActiveWithAudioEda",
+          "when": "view == audioEdaSidebar",
+          "group": "navigation@6"
+        },
+        {
+          "command": "audioEda.openExtensionSettings",
+          "when": "view == audioEdaSidebar",
+          "group": "navigation@7"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "audioEdaActivity",
+          "title": "Audio EDA",
+          "icon": "media/audio-eda-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "audioEdaActivity": [
+        {
+          "id": "audioEdaSidebar",
+          "name": "Workspace Presets"
+        }
+      ]
+    },
+    "customEditors": [
+      {
+        "viewType": "audioEda.editor",
+        "displayName": "Audio EDA Workspace",
+        "selector": [
+          { "filenamePattern": "*.wav" },
+          { "filenamePattern": "*.WAV" },
+          { "filenamePattern": "*.flac" },
+          { "filenamePattern": "*.FLAC" },
+          { "filenamePattern": "*.mp3" },
+          { "filenamePattern": "*.MP3" },
+          { "filenamePattern": "*.mpga" },
+          { "filenamePattern": "*.MPGA" },
+          { "filenamePattern": "*.mpeg" },
+          { "filenamePattern": "*.MPEG" },
+          { "filenamePattern": "*.ogg" },
+          { "filenamePattern": "*.OGG" },
+          { "filenamePattern": "*.m4a" },
+          { "filenamePattern": "*.M4A" },
+          { "filenamePattern": "*.aac" },
+          { "filenamePattern": "*.AAC" },
+          { "filenamePattern": "*.opus" },
+          { "filenamePattern": "*.OPUS" },
+          { "filenamePattern": "*.sph" },
+          { "filenamePattern": "*.SPH" }
+        ],
+        "priority": "option"
+      }
+    ],
+    "configuration": {
+      "title": "Audio EDA",
+      "properties": {
+        "audioEda.toolboxPath": {
+          "type": "string",
+          "default": "audio-eda",
+          "description": "Path to the Python toolbox executable."
+        },
+        "audioEda.openWorkbenchOnStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Open the Audio EDA workbench automatically when the extension activates."
+        },
+        "audioEda.openWorkbenchWhenAudioFileFocused": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically open Audio EDA workbench when an audio file is focused in the editor."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.3.2",
+    "@types/node": "^20.14.10",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.5.4"
+  }
+}

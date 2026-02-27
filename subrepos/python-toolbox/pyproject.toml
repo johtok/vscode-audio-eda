@@ -1,0 +1,13 @@
+[project]
+name = "audio-eda-toolbox"
+version = "0.1.0"
+description = "Python toolbox for audio exploratory data analysis and ML dataset diagnostics"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+audio-eda = "audio_eda_toolbox.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
