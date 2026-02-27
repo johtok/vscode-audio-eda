@@ -6089,8 +6089,38 @@
 
       const row = document.createElement("li");
       row.className = "stack-item";
-      row.draggable = false;
+      row.draggable = true;
       row.dataset.index = String(index);
+      let suppressDragStart = false;
+
+      const markSuppressDragStart = function () {
+        suppressDragStart = true;
+      };
+      const clearSuppressDragStartSoon = function () {
+        window.setTimeout(function () {
+          suppressDragStart = false;
+        }, 0);
+      };
+
+      row.addEventListener("dragstart", function (event) {
+        if (suppressDragStart) {
+          event.preventDefault();
+          return;
+        }
+
+        dragIndex = index;
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", String(index));
+        }
+        row.classList.add("dragging");
+      });
+
+      row.addEventListener("dragend", function () {
+        dragIndex = null;
+        row.classList.remove("dragging");
+        row.classList.remove("drag-over");
+      });
 
       row.addEventListener("dragover", function (event) {
         event.preventDefault();
@@ -6121,22 +6151,6 @@
       handle.textContent = "|||";
       handle.title = "Drag to reorder";
       handle.setAttribute("aria-label", "Drag to reorder");
-      handle.draggable = true;
-
-      handle.addEventListener("dragstart", function (event) {
-        dragIndex = index;
-        if (event.dataTransfer) {
-          event.dataTransfer.effectAllowed = "move";
-          event.dataTransfer.setData("text/plain", String(index));
-        }
-        row.classList.add("dragging");
-      });
-
-      handle.addEventListener("dragend", function () {
-        dragIndex = null;
-        row.classList.remove("dragging");
-        row.classList.remove("drag-over");
-      });
 
       const transformSelect = document.createElement("select");
       transformSelect.className = "transform-select";
@@ -6150,7 +6164,7 @@
         transformSelect.appendChild(option);
       });
 
-      transformSelect.addEventListener("change", function () {
+      const applyTransformSelection = function () {
         if (transformSelect.value.indexOf("stft::") === 0) {
           const mode = transformSelect.value.split("::")[1] === "phase" ? "phase" : "magnitude";
           item.kind = "stft";
@@ -6163,7 +6177,18 @@
         renderStackControls();
         renderTransformStack();
         postState();
+      };
+
+      transformSelect.addEventListener("pointerdown", markSuppressDragStart);
+      transformSelect.addEventListener("mousedown", markSuppressDragStart);
+      transformSelect.addEventListener("touchstart", markSuppressDragStart, { passive: true });
+      transformSelect.addEventListener("focus", markSuppressDragStart);
+      transformSelect.addEventListener("blur", clearSuppressDragStartSoon);
+      transformSelect.addEventListener("change", function () {
+        applyTransformSelection();
+        clearSuppressDragStartSoon();
       });
+      transformSelect.addEventListener("input", applyTransformSelection);
 
       const settingsButton = document.createElement("button");
       settingsButton.type = "button";
@@ -6172,6 +6197,7 @@
       settingsButton.addEventListener("click", function (event) {
         event.preventDefault();
         event.stopPropagation();
+        suppressDragStart = true;
         if (expandedRowSettingsIds.has(item.id)) {
           expandedRowSettingsIds.delete(item.id);
         } else {
@@ -6185,6 +6211,7 @@
       removeButton.className = "remove-button";
       removeButton.textContent = "Remove";
       removeButton.addEventListener("click", function () {
+        suppressDragStart = true;
         state.stack.splice(index, 1);
         expandedRowSettingsIds.delete(item.id);
         renderStackControls();
