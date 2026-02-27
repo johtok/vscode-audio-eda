@@ -4,7 +4,9 @@ export type TransformViewKind =
   | "mel"
   | "mfcc"
   | "dct"
-  | "custom_filterbank";
+  | "custom_filterbank"
+  | "tempogram"
+  | "fourier_tempogram";
 
 export type ActivationOverlayMode = "flag" | "timestamped";
 

@@ -16,6 +16,8 @@
     { value: "mel", label: "mel" },
     { value: "mfcc", label: "mfcc" },
     { value: "dct", label: "dct" },
+    { value: "tempogram", label: "tempogram" },
+    { value: "fourier_tempogram", label: "fourier_tempogram" },
     { value: "custom_filterbank", label: "custom_filterbank" }
   ];
 
@@ -30,7 +32,16 @@
     "stacked",
     "stacked_difference"
   ];
-  const STACK_ITEM_KINDS = ["timeseries", "stft", "mel", "mfcc", "dct", "custom_filterbank"];
+  const STACK_ITEM_KINDS = [
+    "timeseries",
+    "stft",
+    "mel",
+    "mfcc",
+    "dct",
+    "tempogram",
+    "fourier_tempogram",
+    "custom_filterbank"
+  ];
   const OVERLAY_MODES = ["flag", "timestamped"];
   const WORKSPACE_PRESET_IDS = ["default", "transforms", "metrics", "pca"];
   const DEFAULT_FLAG_OVERLAY_COLOR = "#ef4444";
@@ -324,6 +335,8 @@
       item.kind === "mel" ||
       item.kind === "mfcc" ||
       item.kind === "dct" ||
+      item.kind === "tempogram" ||
+      item.kind === "fourier_tempogram" ||
       item.kind === "custom_filterbank"
     ) {
       const stft = sanitizeStftParams(asRecord(paramsRecord && paramsRecord.stft));
@@ -740,9 +753,12 @@
   function createEmptyDerivedCache() {
     return {
       stftByKey: Object.create(null),
+      onsetByKey: Object.create(null),
       melByKey: Object.create(null),
       mfccByKey: Object.create(null),
       dctByKey: Object.create(null),
+      tempogramByKey: Object.create(null),
+      fourierTempogramByKey: Object.create(null),
       customFilterbankByKey: Object.create(null)
     };
   }
@@ -958,6 +974,12 @@
       };
     }
 
+    if (kind === "tempogram" || kind === "fourier_tempogram") {
+      return {
+        stft: cloneParams(defaults.stft)
+      };
+    }
+
     return {};
   }
 
@@ -1141,6 +1163,8 @@
         "mel",
         "mfcc",
         "dct",
+        "tempogram",
+        "fourier_tempogram",
         "custom_filterbank"
       ]);
       state.pca.enabled = false;
@@ -4562,6 +4586,231 @@
     return ensureDctForAudio(item, primaryAudio, derivedCache);
   }
 
+  function ensureOnsetEnvelopeForAudio(item, audioData, cache) {
+    const stft = ensureStftForAudio(item, audioData, cache);
+    const onsetKey = stft.cacheKey + "::onset";
+    if (cache.onsetByKey[onsetKey]) {
+      return cache.onsetByKey[onsetKey];
+    }
+
+    const frameCount = stft.logMagnitudeFrames.length;
+    const onset = new Float32Array(frameCount);
+    for (let frameIndex = 1; frameIndex < frameCount; frameIndex += 1) {
+      const current = stft.logMagnitudeFrames[frameIndex];
+      const previous = stft.logMagnitudeFrames[frameIndex - 1];
+      let flux = 0;
+      for (let bin = 1; bin < current.length; bin += 1) {
+        const delta = current[bin] - previous[bin];
+        if (delta > 0) {
+          flux += delta;
+        }
+      }
+      onset[frameIndex] = flux;
+    }
+
+    let maxValue = 0;
+    for (let index = 0; index < onset.length; index += 1) {
+      if (onset[index] > maxValue) {
+        maxValue = onset[index];
+      }
+    }
+    if (maxValue > 1e-12) {
+      for (let index = 0; index < onset.length; index += 1) {
+        onset[index] /= maxValue;
+      }
+    }
+
+    const onsetResult = {
+      cacheKey: onsetKey,
+      values: onset,
+      frameCount,
+      frameRateHz: stft.sampleRate / Math.max(1, stft.hopSize),
+      durationSeconds: stft.durationSeconds
+    };
+    cache.onsetByKey[onsetKey] = onsetResult;
+    return onsetResult;
+  }
+
+  function computeTempogramMatrix(onsetValues, frameRateHz) {
+    const frameCount = onsetValues.length;
+    if (frameCount <= 0 || frameRateHz <= 0) {
+      return {
+        matrix: [new Float32Array(1)],
+        lagCount: 1,
+        tempoMinBpm: 0,
+        tempoMaxBpm: 0
+      };
+    }
+
+    const windowFrames = clamp(Math.round(frameRateHz * 8), 16, 256);
+    const halfWindow = Math.floor(windowFrames / 2);
+    let lagCount = clamp(Math.round(frameRateHz * 2), 8, 192);
+    lagCount = Math.min(lagCount, Math.max(1, frameCount - 1));
+
+    const centered = new Float32Array(frameCount);
+    let mean = 0;
+    for (let index = 0; index < frameCount; index += 1) {
+      mean += onsetValues[index];
+    }
+    mean /= Math.max(1, frameCount);
+    for (let index = 0; index < frameCount; index += 1) {
+      centered[index] = onsetValues[index] - mean;
+    }
+
+    const matrix = new Array(frameCount);
+    for (let center = 0; center < frameCount; center += 1) {
+      const row = new Float32Array(lagCount);
+      const windowStart = Math.max(0, center - halfWindow);
+      const windowEnd = Math.min(frameCount, center + halfWindow + 1);
+      for (let lag = 1; lag <= lagCount; lag += 1) {
+        const start = windowStart + lag;
+        if (start >= windowEnd) {
+          row[lag - 1] = 0;
+          continue;
+        }
+        let sum = 0;
+        let count = 0;
+        for (let index = start; index < windowEnd; index += 1) {
+          sum += centered[index] * centered[index - lag];
+          count += 1;
+        }
+        row[lag - 1] = count > 0 ? sum / count : 0;
+      }
+      matrix[center] = row;
+    }
+
+    return {
+      matrix,
+      lagCount,
+      tempoMinBpm: (60 * frameRateHz) / Math.max(1, lagCount),
+      tempoMaxBpm: 60 * frameRateHz
+    };
+  }
+
+  function computeFourierTempogramMatrix(onsetValues, frameRateHz) {
+    const frameCount = onsetValues.length;
+    if (frameCount <= 0 || frameRateHz <= 0) {
+      return {
+        matrix: [new Float32Array(1)],
+        binCount: 1,
+        tempoMinBpm: 0,
+        tempoMaxBpm: 0
+      };
+    }
+
+    const windowFrames = clamp(Math.round(frameRateHz * 8), 32, 256);
+    const halfWindow = Math.floor(windowFrames / 2);
+    let nfft = 1;
+    while (nfft < windowFrames) {
+      nfft *= 2;
+    }
+    nfft = Math.max(32, nfft);
+
+    const minTempoBpm = 20;
+    const maxTempoBpm = 600;
+    let minBin = Math.max(
+      1,
+      Math.floor(((minTempoBpm / 60) * nfft) / Math.max(1e-9, frameRateHz))
+    );
+    let maxBin = Math.min(
+      Math.floor(nfft / 2),
+      Math.ceil(((maxTempoBpm / 60) * nfft) / Math.max(1e-9, frameRateHz))
+    );
+    if (maxBin < minBin) {
+      minBin = 1;
+      maxBin = Math.max(1, Math.floor(nfft / 2));
+    }
+
+    const binCount = Math.max(1, maxBin - minBin + 1);
+    const window = createWindow(windowFrames, "hann");
+    const centered = new Float32Array(frameCount);
+    let mean = 0;
+    for (let index = 0; index < frameCount; index += 1) {
+      mean += onsetValues[index];
+    }
+    mean /= Math.max(1, frameCount);
+    for (let index = 0; index < frameCount; index += 1) {
+      centered[index] = onsetValues[index] - mean;
+    }
+
+    const matrix = new Array(frameCount);
+    for (let center = 0; center < frameCount; center += 1) {
+      const re = new Float64Array(nfft);
+      const im = new Float64Array(nfft);
+      for (let index = 0; index < windowFrames; index += 1) {
+        const sourceIndex = center - halfWindow + index;
+        const value = sourceIndex >= 0 && sourceIndex < frameCount ? centered[sourceIndex] : 0;
+        re[index] = value * window[index];
+      }
+      fftInPlace(re, im);
+
+      const row = new Float32Array(binCount);
+      for (let bin = minBin; bin <= maxBin; bin += 1) {
+        row[bin - minBin] = Math.hypot(re[bin], im[bin]);
+      }
+      matrix[center] = row;
+    }
+
+    return {
+      matrix,
+      binCount,
+      tempoMinBpm: (60 * minBin * frameRateHz) / nfft,
+      tempoMaxBpm: (60 * maxBin * frameRateHz) / nfft
+    };
+  }
+
+  function ensureTempogramForAudio(item, audioData, cache) {
+    const onset = ensureOnsetEnvelopeForAudio(item, audioData, cache);
+    const key = onset.cacheKey + "::tempogram";
+    if (cache.tempogramByKey[key]) {
+      return cache.tempogramByKey[key];
+    }
+
+    const computed = computeTempogramMatrix(onset.values, onset.frameRateHz);
+    const result = {
+      cacheKey: key,
+      matrix: computed.matrix,
+      lagCount: computed.lagCount,
+      frameRateHz: onset.frameRateHz,
+      tempoMinBpm: computed.tempoMinBpm,
+      tempoMaxBpm: computed.tempoMaxBpm,
+      durationSeconds: onset.durationSeconds
+    };
+
+    cache.tempogramByKey[key] = result;
+    return result;
+  }
+
+  function ensureTempogram(item) {
+    return ensureTempogramForAudio(item, primaryAudio, derivedCache);
+  }
+
+  function ensureFourierTempogramForAudio(item, audioData, cache) {
+    const onset = ensureOnsetEnvelopeForAudio(item, audioData, cache);
+    const key = onset.cacheKey + "::fourier_tempogram";
+    if (cache.fourierTempogramByKey[key]) {
+      return cache.fourierTempogramByKey[key];
+    }
+
+    const computed = computeFourierTempogramMatrix(onset.values, onset.frameRateHz);
+    const result = {
+      cacheKey: key,
+      matrix: computed.matrix,
+      binCount: computed.binCount,
+      frameRateHz: onset.frameRateHz,
+      tempoMinBpm: computed.tempoMinBpm,
+      tempoMaxBpm: computed.tempoMaxBpm,
+      durationSeconds: onset.durationSeconds
+    };
+
+    cache.fourierTempogramByKey[key] = result;
+    return result;
+  }
+
+  function ensureFourierTempogram(item) {
+    return ensureFourierTempogramForAudio(item, primaryAudio, derivedCache);
+  }
+
   function ensureCustomFilterbankForAudio(item, audioData, cache) {
     if (!customFilterbank) {
       throw new Error("Upload a custom filterbank CSV first.");
@@ -4662,6 +4911,32 @@
       case "dct": {
         const dct = ensureDct(item);
         return dct.coeffs + " DCT coefficients";
+      }
+      case "tempogram": {
+        const tempogram = ensureTempogram(item);
+        return (
+          tempogram.matrix.length +
+          " frames x " +
+          tempogram.lagCount +
+          " lag bins | " +
+          tempogram.tempoMinBpm.toFixed(1) +
+          "-" +
+          tempogram.tempoMaxBpm.toFixed(1) +
+          " BPM"
+        );
+      }
+      case "fourier_tempogram": {
+        const fourierTempogram = ensureFourierTempogram(item);
+        return (
+          fourierTempogram.matrix.length +
+          " frames x " +
+          fourierTempogram.binCount +
+          " tempo bins | " +
+          fourierTempogram.tempoMinBpm.toFixed(1) +
+          "-" +
+          fourierTempogram.tempoMaxBpm.toFixed(1) +
+          " BPM"
+        );
       }
       case "custom_filterbank":
         return customFilterbank ? "CSV: " + customFilterbank.fileName : "Requires filterbank CSV";
@@ -4776,6 +5051,38 @@
         durationSeconds: dct.durationSeconds,
         matrix: dct.matrix,
         caption: "DCT-II on log STFT magnitudes, first " + dct.coeffs + " coefficients."
+      };
+    }
+
+    if (kind === "tempogram") {
+      const tempogram = ensureTempogramForAudio(item, audioData, cache);
+      return {
+        type: "matrix",
+        domainLength: tempogram.matrix.length,
+        durationSeconds: tempogram.durationSeconds,
+        matrix: tempogram.matrix,
+        caption:
+          "Tempogram (lag-domain onset autocorrelation) over " +
+          tempogram.tempoMinBpm.toFixed(1) +
+          "-" +
+          tempogram.tempoMaxBpm.toFixed(1) +
+          " BPM."
+      };
+    }
+
+    if (kind === "fourier_tempogram") {
+      const fourierTempogram = ensureFourierTempogramForAudio(item, audioData, cache);
+      return {
+        type: "matrix",
+        domainLength: fourierTempogram.matrix.length,
+        durationSeconds: fourierTempogram.durationSeconds,
+        matrix: fourierTempogram.matrix,
+        caption:
+          "Fourier tempogram (local FFT of onset strength) over " +
+          fourierTempogram.tempoMinBpm.toFixed(1) +
+          "-" +
+          fourierTempogram.tempoMaxBpm.toFixed(1) +
+          " BPM."
       };
     }
 
@@ -5660,6 +5967,159 @@
     return panel;
   }
 
+  function createTimeseriesFeatureCard(title) {
+    const card = document.createElement("section");
+    card.className = "timeseries-feature-card";
+
+    const heading = document.createElement("h4");
+    heading.className = "timeseries-feature-title";
+    heading.textContent = title;
+    card.appendChild(heading);
+
+    return card;
+  }
+
+  function appendTimeseriesFeatureRow(card, label, value) {
+    const row = document.createElement("div");
+    row.className = "timeseries-feature-row";
+
+    const key = document.createElement("span");
+    key.className = "timeseries-feature-label";
+    key.textContent = label;
+
+    const val = document.createElement("span");
+    val.className = "timeseries-feature-value";
+    val.textContent = value;
+
+    row.appendChild(key);
+    row.appendChild(val);
+    card.appendChild(row);
+  }
+
+  function buildTimeseriesFeaturePanel(renderSpec, windowInfo) {
+    if (
+      !state.features.power &&
+      !state.features.autocorrelation &&
+      !state.features.shortTimePower &&
+      !state.features.shortTimeAutocorrelation
+    ) {
+      return null;
+    }
+
+    const samples = renderSpec.samples;
+    const sampleRate = renderSpec.sampleRate || 0;
+    if (!samples || !samples.length || sampleRate <= 0) {
+      return null;
+    }
+
+    const boundedStart = clamp(Math.floor(windowInfo.startIndex), 0, Math.max(0, samples.length - 1));
+    const boundedEnd = clamp(Math.ceil(windowInfo.endIndex), boundedStart + 1, samples.length);
+    const windowSamples =
+      typeof samples.subarray === "function"
+        ? samples.subarray(boundedStart, boundedEnd)
+        : samples.slice(boundedStart, boundedEnd);
+
+    const panel = document.createElement("div");
+    panel.className = "timeseries-features";
+
+    if (state.features.power) {
+      let sumSquares = 0;
+      let peakAbs = 0;
+      for (let index = 0; index < windowSamples.length; index += 1) {
+        const value = windowSamples[index];
+        sumSquares += value * value;
+        const absolute = Math.abs(value);
+        if (absolute > peakAbs) {
+          peakAbs = absolute;
+        }
+      }
+
+      const meanPower = sumSquares / Math.max(1, windowSamples.length);
+      const rms = Math.sqrt(meanPower);
+      const crest = rms > 1e-12 ? peakAbs / rms : 0;
+      const card = createTimeseriesFeatureCard("Power");
+      appendTimeseriesFeatureRow(card, "Mean power", formatMetricNumber(meanPower, 8));
+      appendTimeseriesFeatureRow(card, "Mean power (dB)", formatMetricNumber(10 * Math.log10(meanPower + 1e-12), 3));
+      appendTimeseriesFeatureRow(card, "RMS", formatMetricNumber(rms, 6));
+      appendTimeseriesFeatureRow(card, "Crest factor", formatMetricNumber(crest, 4));
+      panel.appendChild(card);
+    }
+
+    if (state.features.autocorrelation) {
+      const autocorr = summarizeAutocorrelation(windowSamples, sampleRate);
+      const lagMs = autocorr.bestLag > 0 ? (1000 * autocorr.bestLag) / sampleRate : 0;
+      const card = createTimeseriesFeatureCard("Autocorrelation");
+      appendTimeseriesFeatureRow(card, "Best lag", String(autocorr.bestLag) + " samples");
+      appendTimeseriesFeatureRow(card, "Best lag (ms)", formatMetricNumber(lagMs, 3));
+      appendTimeseriesFeatureRow(
+        card,
+        "Best correlation",
+        formatMetricNumber(autocorr.bestCorrelation, 5)
+      );
+      appendTimeseriesFeatureRow(
+        card,
+        "Freq proxy",
+        autocorr.estimatedF0Hz > 0 ? formatMetricNumber(autocorr.estimatedF0Hz, 3) + " Hz" : "n/a"
+      );
+      panel.appendChild(card);
+    }
+
+    let frameSummary = null;
+    if (state.features.shortTimePower || state.features.shortTimeAutocorrelation) {
+      frameSummary = summarizeFrames(windowSamples, sampleRate);
+    }
+
+    if (state.features.shortTimePower) {
+      const frameEnergies = frameSummary ? frameSummary.energyByFrame : [];
+      const sortedEnergies = frameEnergies.slice().sort(function (a, b) {
+        return a - b;
+      });
+      const meanPower = meanOfNumbers(frameEnergies);
+      const card = createTimeseriesFeatureCard("Short-Time Power");
+      appendTimeseriesFeatureRow(card, "Frames", String(frameEnergies.length));
+      appendTimeseriesFeatureRow(card, "Frame mean", formatMetricNumber(meanPower, 8));
+      appendTimeseriesFeatureRow(
+        card,
+        "Frame mean (dB)",
+        formatMetricNumber(10 * Math.log10(meanPower + 1e-12), 3)
+      );
+      appendTimeseriesFeatureRow(card, "Frame std", formatMetricNumber(stdOfNumbers(frameEnergies, meanPower), 8));
+      appendTimeseriesFeatureRow(
+        card,
+        "Frame P05/P95",
+        formatMetricNumber(quantileSorted(sortedEnergies, 0.05), 8) +
+          " / " +
+          formatMetricNumber(quantileSorted(sortedEnergies, 0.95), 8)
+      );
+      panel.appendChild(card);
+    }
+
+    if (state.features.shortTimeAutocorrelation) {
+      const frameEnergies = frameSummary ? frameSummary.energyByFrame : [];
+      const frameRateHz = frameSummary && frameSummary.hopSize > 0 ? sampleRate / frameSummary.hopSize : 0;
+      const shortAuto =
+        frameEnergies.length > 0
+          ? summarizeAutocorrelation(Float32Array.from(frameEnergies), frameRateHz)
+          : { bestLag: 0, bestCorrelation: 0, estimatedF0Hz: 0 };
+      const card = createTimeseriesFeatureCard("Short-Time Autocorr");
+      appendTimeseriesFeatureRow(card, "Frames", String(frameEnergies.length));
+      appendTimeseriesFeatureRow(card, "Best lag", String(shortAuto.bestLag) + " frames");
+      appendTimeseriesFeatureRow(
+        card,
+        "Best correlation",
+        formatMetricNumber(shortAuto.bestCorrelation, 5)
+      );
+      appendTimeseriesFeatureRow(
+        card,
+        "Modulation proxy",
+        shortAuto.estimatedF0Hz > 0 ? formatMetricNumber(shortAuto.estimatedF0Hz, 3) + " Hz" : "n/a"
+      );
+      panel.appendChild(card);
+    }
+
+    return panel.childElementCount > 0 ? panel : null;
+  }
+
   function heatColor(t) {
     const x = clamp(t, 0, 1);
     const r = Math.round(255 * clamp(1.5 * x - 0.2, 0, 1));
@@ -5968,6 +6428,8 @@
       kind === "mel" ||
       kind === "mfcc" ||
       kind === "dct" ||
+      kind === "tempogram" ||
+      kind === "fourier_tempogram" ||
       kind === "custom_filterbank"
     );
   }
@@ -6562,6 +7024,11 @@
 
           const timeseriesStats = buildTimeseriesStatsPanel(primaryRenderSpec, windowInfo);
           body.appendChild(timeseriesStats);
+
+          const featurePanel = buildTimeseriesFeaturePanel(primaryRenderSpec, windowInfo);
+          if (featurePanel) {
+            body.appendChild(featurePanel);
+          }
         }
 
         if (primaryRenderSpec.type === "matrix" && shouldShowSpectralBar(item.id)) {
@@ -6894,24 +7361,28 @@
 
   featurePower.addEventListener("change", function () {
     state.features.power = featurePower.checked;
+    renderTransformStack();
     renderMetricsReport();
     postState();
   });
 
   featureAutocorrelation.addEventListener("change", function () {
     state.features.autocorrelation = featureAutocorrelation.checked;
+    renderTransformStack();
     renderMetricsReport();
     postState();
   });
 
   featureShorttimePower.addEventListener("change", function () {
     state.features.shortTimePower = featureShorttimePower.checked;
+    renderTransformStack();
     renderMetricsReport();
     postState();
   });
 
   featureShorttimeAutocorrelation.addEventListener("change", function () {
     state.features.shortTimeAutocorrelation = featureShorttimeAutocorrelation.checked;
+    renderTransformStack();
     renderMetricsReport();
     postState();
   });

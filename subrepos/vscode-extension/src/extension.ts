@@ -43,7 +43,9 @@ const VALID_TRANSFORM_KINDS = new Set([
   "mel",
   "mfcc",
   "dct",
-  "custom_filterbank"
+  "custom_filterbank",
+  "tempogram",
+  "fourier_tempogram"
 ]);
 const VALID_OVERLAY_MODES = new Set(["flag", "timestamped"]);
 const VALID_COMPARISON_MODES = new Set([
