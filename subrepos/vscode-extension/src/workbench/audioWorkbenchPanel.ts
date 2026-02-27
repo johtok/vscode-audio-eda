@@ -1,9 +1,19 @@
 import * as vscode from "vscode";
 import { buildWorkbenchHtml, getWorkbenchLocalResourceRoots } from "./workbenchHtml";
 
+export interface WorkbenchStatePersistence {
+  load(): unknown | undefined;
+  save(state: unknown): Thenable<void> | void;
+}
+
 export class AudioWorkbenchPanel {
   public static readonly viewType = "audioEda.workbench";
   private static currentPanel: AudioWorkbenchPanel | undefined;
+  private static statePersistence: WorkbenchStatePersistence | undefined;
+
+  public static configureStatePersistence(persistence: WorkbenchStatePersistence): void {
+    AudioWorkbenchPanel.statePersistence = persistence;
+  }
 
   public static openPreset(extensionUri: vscode.Uri, presetId: string): void {
     AudioWorkbenchPanel.createOrShow(extensionUri);
@@ -33,19 +43,31 @@ export class AudioWorkbenchPanel {
       }
     );
 
-    AudioWorkbenchPanel.currentPanel = new AudioWorkbenchPanel(panel, extensionUri, initialAudioUri);
+    AudioWorkbenchPanel.currentPanel = new AudioWorkbenchPanel(
+      panel,
+      extensionUri,
+      initialAudioUri,
+      AudioWorkbenchPanel.statePersistence
+    );
   }
 
   private readonly panel: vscode.WebviewPanel;
   private readonly extensionUri: vscode.Uri;
+  private readonly statePersistence: WorkbenchStatePersistence | undefined;
   private readonly disposables: vscode.Disposable[] = [];
   private pendingPreloadUri: vscode.Uri | undefined;
   private pendingPresetId: string | undefined;
   private webviewReady = false;
 
-  private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, initialAudioUri?: vscode.Uri) {
+  private constructor(
+    panel: vscode.WebviewPanel,
+    extensionUri: vscode.Uri,
+    initialAudioUri: vscode.Uri | undefined,
+    statePersistence: WorkbenchStatePersistence | undefined
+  ) {
     this.panel = panel;
     this.extensionUri = extensionUri;
+    this.statePersistence = statePersistence;
     this.pendingPreloadUri = initialAudioUri?.scheme === "file" ? initialAudioUri : undefined;
 
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
@@ -54,7 +76,11 @@ export class AudioWorkbenchPanel {
       null,
       this.disposables
     );
-    this.panel.webview.html = buildWorkbenchHtml(this.panel.webview, this.extensionUri);
+    this.panel.webview.html = buildWorkbenchHtml(
+      this.panel.webview,
+      this.extensionUri,
+      this.statePersistence?.load()
+    );
   }
 
   private dispose(): void {
@@ -74,6 +100,11 @@ export class AudioWorkbenchPanel {
       this.webviewReady = true;
       this.trySendPreloadMessage();
       this.trySendPresetMessage();
+      return;
+    }
+
+    if ("type" in message && message.type === "stateChanged" && "payload" in message) {
+      void this.statePersistence?.save(message.payload);
     }
   }
 

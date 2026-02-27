@@ -1,7 +1,14 @@
 (function () {
   // Interaction and UX inspired by vscode-audio-preview:
   // https://github.com/sukumo28/vscode-audio-preview
-  const vscode = typeof acquireVsCodeApi === "function" ? acquireVsCodeApi() : { postMessage: () => {} };
+  const vscode =
+    typeof acquireVsCodeApi === "function"
+      ? acquireVsCodeApi()
+      : {
+          postMessage: () => {},
+          getState: () => undefined,
+          setState: () => {}
+        };
   const transformKinds = [
     { value: "timeseries", label: "timeseries" },
     { value: "magnitude_spectrogram", label: "spectrogram (magnitude)" },
@@ -47,7 +54,7 @@
     enhancement: "Speech enhancement: GEVD/EVD on speech vs noise covariance matrices."
   };
 
-  const bootstrap = window.__AUDIO_EDA_BOOTSTRAP__ || {
+  const bootstrapBase = window.__AUDIO_EDA_BOOTSTRAP__ || {
     stack: [],
     overlay: { enabled: false, mode: "flag", csvName: null },
     comparison: { mode: "none", secondAudioName: null },
@@ -69,6 +76,9 @@
     transformParams: DEFAULT_TRANSFORM_PARAMS
   };
 
+  const persistedState =
+    typeof vscode.getState === "function" ? vscode.getState() : undefined;
+  const bootstrap = mergeBootstrapState(bootstrapBase, persistedState);
   const state = JSON.parse(JSON.stringify(bootstrap));
   ensureTransformParamState();
   normalizeLegacyTransformKinds();
@@ -148,6 +158,75 @@
 
   function copyDefaultTransformParams() {
     return JSON.parse(JSON.stringify(DEFAULT_TRANSFORM_PARAMS));
+  }
+
+  function mergeBootstrapState(baseState, restoredState) {
+    const merged = JSON.parse(JSON.stringify(baseState));
+    if (!restoredState || typeof restoredState !== "object") {
+      return merged;
+    }
+
+    if (Array.isArray(restoredState.stack)) {
+      merged.stack = restoredState.stack;
+    }
+
+    if (restoredState.overlay && typeof restoredState.overlay === "object") {
+      merged.overlay = Object.assign({}, merged.overlay, restoredState.overlay);
+    }
+
+    if (restoredState.comparison && typeof restoredState.comparison === "object") {
+      merged.comparison = Object.assign({}, merged.comparison, restoredState.comparison);
+    }
+
+    if (restoredState.metrics && typeof restoredState.metrics === "object") {
+      merged.metrics = Object.assign({}, merged.metrics, restoredState.metrics);
+    }
+
+    if (restoredState.features && typeof restoredState.features === "object") {
+      merged.features = Object.assign({}, merged.features, restoredState.features);
+    }
+
+    if (restoredState.pca && typeof restoredState.pca === "object") {
+      merged.pca = Object.assign({}, merged.pca, restoredState.pca);
+    }
+
+    if (restoredState.multichannel && typeof restoredState.multichannel === "object") {
+      merged.multichannel = Object.assign({}, merged.multichannel, restoredState.multichannel);
+    }
+
+    if (restoredState.transformParams && typeof restoredState.transformParams === "object") {
+      merged.transformParams = Object.assign({}, merged.transformParams, restoredState.transformParams);
+      if (restoredState.transformParams.stft && typeof restoredState.transformParams.stft === "object") {
+        merged.transformParams.stft = Object.assign(
+          {},
+          merged.transformParams.stft,
+          restoredState.transformParams.stft
+        );
+      }
+      if (restoredState.transformParams.mel && typeof restoredState.transformParams.mel === "object") {
+        merged.transformParams.mel = Object.assign(
+          {},
+          merged.transformParams.mel,
+          restoredState.transformParams.mel
+        );
+      }
+      if (restoredState.transformParams.mfcc && typeof restoredState.transformParams.mfcc === "object") {
+        merged.transformParams.mfcc = Object.assign(
+          {},
+          merged.transformParams.mfcc,
+          restoredState.transformParams.mfcc
+        );
+      }
+      if (restoredState.transformParams.dct && typeof restoredState.transformParams.dct === "object") {
+        merged.transformParams.dct = Object.assign(
+          {},
+          merged.transformParams.dct,
+          restoredState.transformParams.dct
+        );
+      }
+    }
+
+    return merged;
   }
 
   function normalizeLegacyTransformKinds() {
@@ -595,6 +674,10 @@
   }
 
   function postState() {
+    if (typeof vscode.setState === "function") {
+      vscode.setState(state);
+    }
+
     vscode.postMessage({
       type: "stateChanged",
       payload: state

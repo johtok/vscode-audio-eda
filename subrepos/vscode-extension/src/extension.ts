@@ -19,6 +19,7 @@ const AUDIO_EXTENSIONS = new Set([
 ]);
 
 const EXTENSION_ID = "local-dev.audio-eda-vscode";
+const WORKBENCH_STATE_KEY = "audioEda.workbenchState";
 
 function logJson(channel: vscode.OutputChannel, heading: string, payload: unknown): void {
   channel.appendLine(heading);
@@ -121,10 +122,19 @@ export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Audio EDA");
   const sidebarProvider = new AudioEdaSidebarProvider();
   const reopenGuard = new Set<string>();
+  const workbenchStatePersistence = {
+    load: (): unknown | undefined => context.workspaceState.get(WORKBENCH_STATE_KEY),
+    save: (state: unknown): Thenable<void> =>
+      context.workspaceState.update(WORKBENCH_STATE_KEY, state)
+  };
 
   const sidebarTree = vscode.window.registerTreeDataProvider("audioEdaSidebar", sidebarProvider);
+  AudioWorkbenchPanel.configureStatePersistence(workbenchStatePersistence);
 
-  const customEditorProvider = new AudioEdaCustomEditorProvider(context.extensionUri);
+  const customEditorProvider = new AudioEdaCustomEditorProvider(
+    context.extensionUri,
+    workbenchStatePersistence
+  );
   const customEditorRegistration = vscode.window.registerCustomEditorProvider(
     AudioEdaCustomEditorProvider.viewType,
     customEditorProvider,

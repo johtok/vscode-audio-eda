@@ -8,11 +8,23 @@ export function getWorkbenchLocalResourceRoots(extensionUri: vscode.Uri): vscode
   ];
 }
 
-export function buildWorkbenchHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+function resolveBootstrapState(initialState?: unknown): unknown {
+  if (!initialState || typeof initialState !== "object") {
+    return createDefaultWorkbenchState();
+  }
+
+  return initialState;
+}
+
+export function buildWorkbenchHtml(
+  webview: vscode.Webview,
+  extensionUri: vscode.Uri,
+  initialState?: unknown
+): string {
   const nonce = createNonce();
   const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "workbench.js"));
   const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "workbench.css"));
-  const bootstrap = JSON.stringify(createDefaultWorkbenchState());
+  const bootstrap = JSON.stringify(resolveBootstrapState(initialState));
 
   return `<!DOCTYPE html>
 <html lang="en">

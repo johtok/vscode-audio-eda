@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import { buildWorkbenchHtml, getWorkbenchLocalResourceRoots } from "../workbench/workbenchHtml";
+import { WorkbenchStatePersistence } from "../workbench/audioWorkbenchPanel";
 
 interface AudioEdaDocument extends vscode.CustomDocument {
   readonly uri: vscode.Uri;
@@ -20,7 +21,10 @@ export class AudioEdaCustomEditorProvider
 {
   public static readonly viewType = "audioEda.editor";
 
-  public constructor(private readonly extensionUri: vscode.Uri) {}
+  public constructor(
+    private readonly extensionUri: vscode.Uri,
+    private readonly statePersistence?: WorkbenchStatePersistence
+  ) {}
 
   public async openCustomDocument(uri: vscode.Uri): Promise<AudioEdaDocument> {
     return createCustomDocument(uri);
@@ -69,10 +73,19 @@ export class AudioEdaCustomEditorProvider
       if ("type" in message && message.type === "ready") {
         ready = true;
         sendPreloadIfReady();
+        return;
+      }
+
+      if ("type" in message && message.type === "stateChanged" && "payload" in message) {
+        void this.statePersistence?.save(message.payload);
       }
     });
 
-    webviewPanel.webview.html = buildWorkbenchHtml(webviewPanel.webview, this.extensionUri);
+    webviewPanel.webview.html = buildWorkbenchHtml(
+      webviewPanel.webview,
+      this.extensionUri,
+      this.statePersistence?.load()
+    );
 
     webviewPanel.onDidDispose(() => {
       onMessage.dispose();
