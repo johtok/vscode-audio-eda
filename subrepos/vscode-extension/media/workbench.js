@@ -6089,32 +6089,8 @@
 
       const row = document.createElement("li");
       row.className = "stack-item";
-      row.draggable = true;
+      row.draggable = false;
       row.dataset.index = String(index);
-
-      row.addEventListener("dragstart", function (event) {
-        const target = event.target;
-        if (
-          target instanceof Element &&
-          target.closest("select,option,input,textarea,button:not(.drag-handle),a")
-        ) {
-          event.preventDefault();
-          return;
-        }
-
-        dragIndex = index;
-        if (event.dataTransfer) {
-          event.dataTransfer.effectAllowed = "move";
-          event.dataTransfer.setData("text/plain", String(index));
-        }
-        row.classList.add("dragging");
-      });
-
-      row.addEventListener("dragend", function () {
-        dragIndex = null;
-        row.classList.remove("dragging");
-        row.classList.remove("drag-over");
-      });
 
       row.addEventListener("dragover", function (event) {
         event.preventDefault();
@@ -6145,6 +6121,22 @@
       handle.textContent = "|||";
       handle.title = "Drag to reorder";
       handle.setAttribute("aria-label", "Drag to reorder");
+      handle.draggable = true;
+
+      handle.addEventListener("dragstart", function (event) {
+        dragIndex = index;
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", String(index));
+        }
+        row.classList.add("dragging");
+      });
+
+      handle.addEventListener("dragend", function () {
+        dragIndex = null;
+        row.classList.remove("dragging");
+        row.classList.remove("drag-over");
+      });
 
       const transformSelect = document.createElement("select");
       transformSelect.className = "transform-select";
@@ -6173,24 +6165,6 @@
         postState();
       });
 
-      const suspendRowDrag = function () {
-        row.draggable = false;
-      };
-      const resumeRowDrag = function () {
-        row.draggable = true;
-      };
-
-      transformSelect.addEventListener("pointerdown", suspendRowDrag);
-      transformSelect.addEventListener("mousedown", suspendRowDrag);
-      transformSelect.addEventListener("focus", suspendRowDrag);
-      transformSelect.addEventListener("blur", resumeRowDrag);
-      transformSelect.addEventListener("click", function (event) {
-        event.stopPropagation();
-      });
-      transformSelect.addEventListener("change", function () {
-        window.setTimeout(resumeRowDrag, 0);
-      });
-
       const settingsButton = document.createElement("button");
       settingsButton.type = "button";
       settingsButton.className = "row-settings-button";
@@ -6198,7 +6172,6 @@
       settingsButton.addEventListener("click", function (event) {
         event.preventDefault();
         event.stopPropagation();
-        row.draggable = false;
         if (expandedRowSettingsIds.has(item.id)) {
           expandedRowSettingsIds.delete(item.id);
         } else {
@@ -6212,7 +6185,6 @@
       removeButton.className = "remove-button";
       removeButton.textContent = "Remove";
       removeButton.addEventListener("click", function () {
-        row.draggable = false;
         state.stack.splice(index, 1);
         expandedRowSettingsIds.delete(item.id);
         renderStackControls();
