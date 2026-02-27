@@ -508,6 +508,16 @@ input.is-locked {
   margin-top: 8px;
 }
 
+.pca-classwise-section {
+  margin-top: 10px;
+}
+
+.pca-classwise-title {
+  margin: 0 0 6px;
+  font-size: 0.82rem;
+  color: var(--vscode-foreground);
+}
+
 .pca-component-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));

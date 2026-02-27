@@ -5680,12 +5680,16 @@
       activeModel: {
         componentCount: activePca.componentCount,
         explainedRatios: activePca.explainedRatios,
-        explainedSummary: summarizeExplainedRatios(activePca.explainedRatios)
+        explainedSummary: summarizeExplainedRatios(activePca.explainedRatios),
+        componentVectors: activePca.componentVectors,
+        projectionMatrix: activePca.projectionMatrix
       },
       inactiveModel: {
         componentCount: inactivePca.componentCount,
         explainedRatios: inactivePca.explainedRatios,
-        explainedSummary: summarizeExplainedRatios(inactivePca.explainedRatios)
+        explainedSummary: summarizeExplainedRatios(inactivePca.explainedRatios),
+        componentVectors: inactivePca.componentVectors,
+        projectionMatrix: inactivePca.projectionMatrix
       },
       separation,
       status:
@@ -5794,6 +5798,87 @@
       out[index] = re[index] / nfft;
     }
     return out;
+  }
+
+  function buildPcaComponentRepresentations(
+    componentVectors,
+    sourceType,
+    melDefaults,
+    melFilterbank,
+    stftFftSize,
+    stftBinCount,
+    sampleRate
+  ) {
+    const componentMelLoadings = [];
+    const componentMagnitudeLoadings = [];
+    const componentTimeVectors = [];
+
+    if (!Array.isArray(componentVectors) || componentVectors.length === 0) {
+      return {
+        componentMelLoadings,
+        componentMagnitudeLoadings,
+        componentTimeVectors
+      };
+    }
+
+    if (sourceType === "mel") {
+      for (let compIndex = 0; compIndex < componentVectors.length; compIndex += 1) {
+        const sourceVector = componentVectors[compIndex];
+        const melVector =
+          sourceVector.length === melDefaults.bands
+            ? sourceVector
+            : resampleVectorToLength(sourceVector, melDefaults.bands);
+        const magnitudeVector = melFilterbank
+          ? buildMagnitudeLoadingsFromMelLoadings(melVector, melFilterbank)
+          : new Float32Array(stftBinCount || 1);
+        const timeVector = buildTimeVectorFromSpectrumLoadings(
+          magnitudeVector,
+          stftFftSize || 256
+        );
+
+        componentMelLoadings.push(melVector);
+        componentMagnitudeLoadings.push(magnitudeVector);
+        componentTimeVectors.push(timeVector);
+      }
+
+      return {
+        componentMelLoadings,
+        componentMagnitudeLoadings,
+        componentTimeVectors
+      };
+    }
+
+    const denoiseFftSize = nextPowerOfTwo(
+      Math.max(64, (componentVectors[0] ? componentVectors[0].length : 64) * 2)
+    );
+    const denoiseFilterbank = createMelFilterbank(
+      sampleRate || 16000,
+      denoiseFftSize,
+      melDefaults.bands,
+      melDefaults.minHz,
+      melDefaults.maxHz
+    );
+
+    for (let compIndex = 0; compIndex < componentVectors.length; compIndex += 1) {
+      const sourceVector = componentVectors[compIndex];
+      const timeVector = new Float32Array(sourceVector.length);
+      timeVector.set(sourceVector);
+      const magnitudeSpectrum = buildMagnitudeSpectrumFromTimeVector(sourceVector, denoiseFftSize);
+      const melVector = buildMelLoadingsFromMagnitudeLoadings(
+        magnitudeSpectrum.magnitude,
+        denoiseFilterbank
+      );
+
+      componentMelLoadings.push(melVector);
+      componentMagnitudeLoadings.push(magnitudeSpectrum.magnitude);
+      componentTimeVectors.push(timeVector);
+    }
+
+    return {
+      componentMelLoadings,
+      componentMagnitudeLoadings,
+      componentTimeVectors
+    };
   }
 
   function dotProductDense(a, b) {
@@ -6058,55 +6143,47 @@
       : "";
     const notes = [sourceNote, classwiseNote].filter(Boolean).join(" ");
 
-    const componentMelLoadings = [];
-    const componentMagnitudeLoadings = [];
-    const componentTimeVectors = [];
+    const globalRepresentations = buildPcaComponentRepresentations(
+      pca.componentVectors,
+      sourceType,
+      melDefaults,
+      melFilterbank,
+      stftFftSize,
+      stftBinCount,
+      audioData.sampleRate || 16000
+    );
+    const componentMelLoadings = globalRepresentations.componentMelLoadings;
+    const componentMagnitudeLoadings = globalRepresentations.componentMagnitudeLoadings;
+    const componentTimeVectors = globalRepresentations.componentTimeVectors;
 
-    if (sourceType === "mel") {
-      for (let compIndex = 0; compIndex < pca.componentVectors.length; compIndex += 1) {
-        const sourceVector = pca.componentVectors[compIndex];
-        const melVector =
-          sourceVector.length === melDefaults.bands
-            ? sourceVector
-            : resampleVectorToLength(sourceVector, melDefaults.bands);
-        const magnitudeVector = melFilterbank
-          ? buildMagnitudeLoadingsFromMelLoadings(melVector, melFilterbank)
-          : new Float32Array(stftBinCount || 1);
-        const timeVector = buildTimeVectorFromSpectrumLoadings(
-          magnitudeVector,
-          stftFftSize || 256
-        );
-
-        componentMelLoadings.push(melVector);
-        componentMagnitudeLoadings.push(magnitudeVector);
-        componentTimeVectors.push(timeVector);
-      }
-    } else {
-      const denoiseFftSize = nextPowerOfTwo(
-        Math.max(64, (pca.componentVectors[0] ? pca.componentVectors[0].length : 64) * 2)
+    if (classwise.available) {
+      const activeRepresentations = buildPcaComponentRepresentations(
+        classwise.activeModel.componentVectors,
+        sourceType,
+        melDefaults,
+        melFilterbank,
+        stftFftSize,
+        stftBinCount,
+        audioData.sampleRate || 16000
       );
-      const denoiseFilterbank = createMelFilterbank(
-        audioData.sampleRate || 16000,
-        denoiseFftSize,
-        melDefaults.bands,
-        melDefaults.minHz,
-        melDefaults.maxHz
+      classwise.activeModel.componentMelLoadings = activeRepresentations.componentMelLoadings;
+      classwise.activeModel.componentMagnitudeLoadings =
+        activeRepresentations.componentMagnitudeLoadings;
+      classwise.activeModel.componentTimeVectors = activeRepresentations.componentTimeVectors;
+
+      const inactiveRepresentations = buildPcaComponentRepresentations(
+        classwise.inactiveModel.componentVectors,
+        sourceType,
+        melDefaults,
+        melFilterbank,
+        stftFftSize,
+        stftBinCount,
+        audioData.sampleRate || 16000
       );
-
-      for (let compIndex = 0; compIndex < pca.componentVectors.length; compIndex += 1) {
-        const sourceVector = pca.componentVectors[compIndex];
-        const timeVector = new Float32Array(sourceVector.length);
-        timeVector.set(sourceVector);
-        const magnitudeSpectrum = buildMagnitudeSpectrumFromTimeVector(sourceVector, denoiseFftSize);
-        const melVector = buildMelLoadingsFromMagnitudeLoadings(
-          magnitudeSpectrum.magnitude,
-          denoiseFilterbank
-        );
-
-        componentMelLoadings.push(melVector);
-        componentMagnitudeLoadings.push(magnitudeSpectrum.magnitude);
-        componentTimeVectors.push(timeVector);
-      }
+      classwise.inactiveModel.componentMelLoadings = inactiveRepresentations.componentMelLoadings;
+      classwise.inactiveModel.componentMagnitudeLoadings =
+        inactiveRepresentations.componentMagnitudeLoadings;
+      classwise.inactiveModel.componentTimeVectors = inactiveRepresentations.componentTimeVectors;
     }
 
     const result = {
@@ -6692,51 +6769,179 @@
     ctx.fillText(formatMetricNumber(min, 3), 6, paddingTop + plotHeight);
   }
 
+  function buildPcaClassModelSection(titleText, model, parsed, pcaView, colorOffset) {
+    const section = document.createElement("section");
+    section.className = "pca-classwise-section";
+
+    const title = document.createElement("h4");
+    title.className = "pca-classwise-title";
+    title.textContent =
+      titleText +
+      " | k=" +
+      model.componentCount +
+      " | " +
+      (model.explainedSummary || "n/a");
+    section.appendChild(title);
+
+    const selectedIndices = parsed.indices.filter(function (index) {
+      return index < (model.componentVectors ? model.componentVectors.length : 0);
+    });
+
+    if (selectedIndices.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "transform-caption";
+      empty.textContent = "No selected components are available for this class.";
+      section.appendChild(empty);
+      return section;
+    }
+
+    const grid = document.createElement("div");
+    grid.className = "pca-component-grid";
+
+    selectedIndices.forEach(function (componentIndex) {
+      const card = document.createElement("article");
+      card.className = "pca-component-card";
+
+      const cardTitle = document.createElement("h4");
+      cardTitle.className = "pca-component-title";
+      cardTitle.textContent =
+        "PC" +
+        (componentIndex + 1) +
+        " | explained " +
+        formatMetricPercent(model.explainedRatios[componentIndex] || 0);
+      card.appendChild(cardTitle);
+
+      const scoreLabel = document.createElement("div");
+      scoreLabel.className = "pca-component-label";
+      scoreLabel.textContent = "PC score across class rows";
+      card.appendChild(scoreLabel);
+
+      const projectionRows = Array.isArray(model.projectionMatrix) ? model.projectionMatrix : [];
+      const scoreValues = new Float32Array(Math.max(1, projectionRows.length));
+      for (let rowIndex = 0; rowIndex < projectionRows.length; rowIndex += 1) {
+        const row = projectionRows[rowIndex];
+        scoreValues[rowIndex] = row && componentIndex < row.length ? row[componentIndex] : 0;
+      }
+      const scoreCanvas = document.createElement("canvas");
+      scoreCanvas.className = "pca-component-plot";
+      scoreCanvas.width = pickCanvasWidth(1);
+      scoreCanvas.height = 120;
+      drawPcaLinePlot(scoreCanvas, scoreValues, {
+        color: pcaComponentColor(componentIndex + colorOffset)
+      });
+      card.appendChild(scoreCanvas);
+
+      const melLabel = document.createElement("div");
+      melLabel.className = "pca-component-label";
+      melLabel.textContent = "Loading across " + (pcaView.melAxisLabel || "mel bins");
+      card.appendChild(melLabel);
+
+      const melValues =
+        model.componentMelLoadings && model.componentMelLoadings[componentIndex]
+          ? model.componentMelLoadings[componentIndex]
+          : model.componentVectors[componentIndex];
+      const melCanvas = document.createElement("canvas");
+      melCanvas.className = "pca-component-plot";
+      melCanvas.width = pickCanvasWidth(1);
+      melCanvas.height = 120;
+      drawPcaLinePlot(melCanvas, melValues, {
+        color: pcaComponentColor(componentIndex + colorOffset)
+      });
+      card.appendChild(melCanvas);
+
+      const magnitudeLabel = document.createElement("div");
+      magnitudeLabel.className = "pca-component-label";
+      magnitudeLabel.textContent =
+        "Loading across " + (pcaView.magnitudeAxisLabel || "magnitude spectrum bins");
+      card.appendChild(magnitudeLabel);
+
+      const magnitudeValues =
+        model.componentMagnitudeLoadings && model.componentMagnitudeLoadings[componentIndex]
+          ? model.componentMagnitudeLoadings[componentIndex]
+          : model.componentVectors[componentIndex];
+      const magnitudeCanvas = document.createElement("canvas");
+      magnitudeCanvas.className = "pca-component-plot";
+      magnitudeCanvas.width = pickCanvasWidth(1);
+      magnitudeCanvas.height = 120;
+      drawPcaLinePlot(magnitudeCanvas, magnitudeValues, {
+        color: pcaComponentColor(componentIndex + colorOffset)
+      });
+      card.appendChild(magnitudeCanvas);
+
+      const timeVectorLabel = document.createElement("div");
+      timeVectorLabel.className = "pca-component-label";
+      timeVectorLabel.textContent =
+        "PC vector in time domain (" + (pcaView.timeAxisLabel || "sample") + ")";
+      card.appendChild(timeVectorLabel);
+
+      const timeVectorValues =
+        model.componentTimeVectors && model.componentTimeVectors[componentIndex]
+          ? model.componentTimeVectors[componentIndex]
+          : model.componentVectors[componentIndex];
+      const timeVectorCanvas = document.createElement("canvas");
+      timeVectorCanvas.className = "pca-component-plot";
+      timeVectorCanvas.width = pickCanvasWidth(1);
+      timeVectorCanvas.height = 120;
+      drawPcaLinePlot(timeVectorCanvas, timeVectorValues, {
+        color: pcaComponentColor(componentIndex + colorOffset)
+      });
+      card.appendChild(timeVectorCanvas);
+
+      grid.appendChild(card);
+    });
+
+    section.appendChild(grid);
+    return section;
+  }
+
   function buildPcaComponentPanel(renderSpec, windowInfo) {
     const pcaView = renderSpec.pcaView;
     if (!pcaView || !Array.isArray(pcaView.componentVectors) || pcaView.componentVectors.length === 0) {
       return null;
     }
 
-    const parsed = parsePcaComponentSelection(
-      state.pca.componentSelection,
-      pcaView.componentVectors.length
-    );
-
     const panel = document.createElement("section");
     panel.className = "pca-component-panel";
 
-    const summary = document.createElement("p");
-    summary.className = "transform-caption";
-    const visibleStart = Math.floor(windowInfo.startIndex) + 1;
-    const visibleEnd = Math.max(visibleStart, Math.floor(windowInfo.endIndex));
-    summary.textContent =
-      "Component selection: " +
-      (parsed.usedAll
-        ? "all (" + pcaView.componentVectors.length + ")"
-        : parsed.indices
-            .map(function (index) {
-              return String(index + 1);
-            })
-            .join(", ")) +
-      " | visible frames " +
-      visibleStart +
-      "-" +
-      visibleEnd +
-      " of " +
-      pcaView.matrix.length +
-      ".";
-    panel.appendChild(summary);
-
-    if (parsed.invalidTokens.length > 0) {
-      const warning = document.createElement("p");
-      warning.className = "transform-caption";
-      warning.textContent =
-        "Ignored invalid component tokens: " + parsed.invalidTokens.join(", ") + ".";
-      panel.appendChild(warning);
-    }
-
     if (state.pca.classwise) {
+      const maxClassComponents = pcaView.classwise && pcaView.classwise.available
+        ? Math.max(
+            pcaView.classwise.activeModel && pcaView.classwise.activeModel.componentVectors
+              ? pcaView.classwise.activeModel.componentVectors.length
+              : 0,
+            pcaView.classwise.inactiveModel && pcaView.classwise.inactiveModel.componentVectors
+              ? pcaView.classwise.inactiveModel.componentVectors.length
+              : 0,
+            1
+          )
+        : pcaView.componentVectors.length;
+      const parsedClasswise = parsePcaComponentSelection(
+        state.pca.componentSelection,
+        maxClassComponents
+      );
+
+      const summary = document.createElement("p");
+      summary.className = "transform-caption";
+      summary.textContent =
+        "Component selection: " +
+        (parsedClasswise.usedAll
+          ? "all (" + maxClassComponents + ")"
+          : parsedClasswise.indices
+              .map(function (index) {
+                return String(index + 1);
+              })
+              .join(", ")) +
+        " | classwise PCA mode.";
+      panel.appendChild(summary);
+
+      if (parsedClasswise.invalidTokens.length > 0) {
+        const warning = document.createElement("p");
+        warning.className = "transform-caption";
+        warning.textContent =
+          "Ignored invalid component tokens: " + parsedClasswise.invalidTokens.join(", ") + ".";
+        panel.appendChild(warning);
+      }
+
       if (pcaView.classwise && pcaView.classwise.available) {
         const classwiseRows = [
           ["Mode", pcaView.classwise.mode],
@@ -6797,6 +7002,25 @@
             ])
           );
         }
+
+        panel.appendChild(
+          buildPcaClassModelSection(
+            "Active class PCA",
+            pcaView.classwise.activeModel,
+            parsedClasswise,
+            pcaView,
+            0
+          )
+        );
+        panel.appendChild(
+          buildPcaClassModelSection(
+            "Inactive class PCA",
+            pcaView.classwise.inactiveModel,
+            parsedClasswise,
+            pcaView,
+            3
+          )
+        );
       } else {
         panel.appendChild(
           createMetricsGroup("Classwise PCA", [
@@ -6809,13 +7033,51 @@
           ])
         );
       }
+
+      return panel;
+    }
+
+    const parsed = parsePcaComponentSelection(
+      state.pca.componentSelection,
+      pcaView.componentVectors.length
+    );
+
+    const summary = document.createElement("p");
+    summary.className = "transform-caption";
+    const safeWindowInfo = windowInfo || { startIndex: 0, endIndex: pcaView.matrix.length };
+    const visibleStart = Math.floor(safeWindowInfo.startIndex) + 1;
+    const visibleEnd = Math.max(visibleStart, Math.floor(safeWindowInfo.endIndex));
+    summary.textContent =
+      "Component selection: " +
+      (parsed.usedAll
+        ? "all (" + pcaView.componentVectors.length + ")"
+        : parsed.indices
+            .map(function (index) {
+              return String(index + 1);
+            })
+            .join(", ")) +
+      " | visible frames " +
+      visibleStart +
+      "-" +
+      visibleEnd +
+      " of " +
+      pcaView.matrix.length +
+      ".";
+    panel.appendChild(summary);
+
+    if (parsed.invalidTokens.length > 0) {
+      const warning = document.createElement("p");
+      warning.className = "transform-caption";
+      warning.textContent =
+        "Ignored invalid component tokens: " + parsed.invalidTokens.join(", ") + ".";
+      panel.appendChild(warning);
     }
 
     const grid = document.createElement("div");
     grid.className = "pca-component-grid";
 
-    const startIndex = clamp(Math.floor(windowInfo.startIndex), 0, Math.max(0, pcaView.matrix.length - 1));
-    const endIndex = clamp(Math.ceil(windowInfo.endIndex), startIndex + 1, pcaView.matrix.length);
+    const startIndex = clamp(Math.floor(safeWindowInfo.startIndex), 0, Math.max(0, pcaView.matrix.length - 1));
+    const endIndex = clamp(Math.ceil(safeWindowInfo.endIndex), startIndex + 1, pcaView.matrix.length);
 
     parsed.indices.forEach(function (componentIndex) {
       const card = document.createElement("article");
@@ -6938,53 +7200,62 @@
       const toolbar = buildTransformToolbar(item, renderSpec);
       body.appendChild(toolbar);
 
-      const grid = document.createElement("div");
-      grid.className = "transform-comparison-grid mode-none";
+      let windowInfo = null;
+      if (!state.pca.classwise) {
+        const grid = document.createElement("div");
+        grid.className = "transform-comparison-grid mode-none";
 
-      const panelWrap = document.createElement("section");
-      panelWrap.className = "comparison-panel";
+        const panelWrap = document.createElement("section");
+        panelWrap.className = "comparison-panel";
 
-      const viewport = document.createElement("div");
-      viewport.className = "transform-viewport";
+        const viewport = document.createElement("div");
+        viewport.className = "transform-viewport";
 
-      const canvas = document.createElement("canvas");
-      canvas.className = "transform-canvas";
-      canvas.width = pickCanvasWidth(1);
-      canvas.height = MATRIX_CANVAS_HEIGHT;
+        const canvas = document.createElement("canvas");
+        canvas.className = "transform-canvas";
+        canvas.width = pickCanvasWidth(1);
+        canvas.height = MATRIX_CANVAS_HEIGHT;
 
-      const windowInfo = computeViewWindow(renderSpec.domainLength, item.id);
-      drawHeatmap(canvas, renderSpec.matrix, windowInfo.startIndex, windowInfo.endIndex);
-      drawActivationOverlay(canvas, renderSpec, windowInfo);
-      attachCanvasInteractions(canvas, item, renderSpec);
+        windowInfo = computeViewWindow(renderSpec.domainLength, item.id);
+        drawHeatmap(canvas, renderSpec.matrix, windowInfo.startIndex, windowInfo.endIndex);
+        drawActivationOverlay(canvas, renderSpec, windowInfo);
+        attachCanvasInteractions(canvas, item, renderSpec);
 
-      const viewportPlayhead = document.createElement("div");
-      viewportPlayhead.className = "transform-playhead";
+        const viewportPlayhead = document.createElement("div");
+        viewportPlayhead.className = "transform-playhead";
 
-      viewport.appendChild(canvas);
-      viewport.appendChild(viewportPlayhead);
-      panelWrap.appendChild(viewport);
-      grid.appendChild(panelWrap);
-      body.appendChild(grid);
+        viewport.appendChild(canvas);
+        viewport.appendChild(viewportPlayhead);
+        panelWrap.appendChild(viewport);
+        grid.appendChild(panelWrap);
+        body.appendChild(grid);
 
-      const scrollbar = buildTransformScrollbar(item, renderSpec);
-      body.appendChild(scrollbar.element);
+        const scrollbar = buildTransformScrollbar(item, renderSpec);
+        body.appendChild(scrollbar.element);
 
-      if (shouldShowSpectralBar(item.id)) {
-        const spectralBar = buildSpectralBar(renderSpec, windowInfo);
-        body.appendChild(spectralBar);
+        if (shouldShowSpectralBar(item.id)) {
+          const spectralBar = buildSpectralBar(renderSpec, windowInfo);
+          body.appendChild(spectralBar);
+        }
+
+        playheadElementsByViewId.set(item.id, {
+          viewportPlayheads: [viewportPlayhead],
+          scrollbarPlayhead: scrollbar.playhead,
+          domainLength: renderSpec.domainLength,
+          durationSeconds: renderSpec.durationSeconds
+        });
+      } else {
+        const classwiseNote = document.createElement("p");
+        classwiseNote.className = "transform-caption";
+        classwiseNote.textContent =
+          "Classwise PCA selected: showing per-class component vectors instead of global projection heatmap.";
+        body.appendChild(classwiseNote);
       }
 
       const pcaComponentPanel = buildPcaComponentPanel(renderSpec, windowInfo);
       if (pcaComponentPanel) {
         body.appendChild(pcaComponentPanel);
       }
-
-      playheadElementsByViewId.set(item.id, {
-        viewportPlayheads: [viewportPlayhead],
-        scrollbarPlayhead: scrollbar.playhead,
-        domainLength: renderSpec.domainLength,
-        durationSeconds: renderSpec.durationSeconds
-      });
 
       const caption = document.createElement("p");
       caption.className = "transform-caption";
