@@ -1909,7 +1909,7 @@
     const minHz = 0;
     const maxHz = Math.min(8000, stft.sampleRate / 2);
     const melFilterbank = createMelFilterbank(stft.sampleRate, stft.fftSize, melBands, minHz, maxHz);
-    const melPower = applyFilterbank(stft.powerFrames, melFilterbank);
+    const melPower = applyFilterbankLinear(stft.powerFrames, melFilterbank);
     if (!melPower.length) {
       return null;
     }
@@ -4403,6 +4403,30 @@
     return output;
   }
 
+  function applyFilterbankLinear(powerFrames, filterbank) {
+    const output = new Array(powerFrames.length);
+
+    for (let frameIndex = 0; frameIndex < powerFrames.length; frameIndex += 1) {
+      const spectrum = powerFrames[frameIndex];
+      const row = new Float32Array(filterbank.length);
+
+      for (let filterIndex = 0; filterIndex < filterbank.length; filterIndex += 1) {
+        const weights = filterbank[filterIndex];
+        let energy = 0;
+
+        for (let bin = 0; bin < weights.length; bin += 1) {
+          energy += spectrum[bin] * weights[bin];
+        }
+
+        row[filterIndex] = Math.max(0, energy);
+      }
+
+      output[frameIndex] = row;
+    }
+
+    return output;
+  }
+
   function ensureMfccForAudio(item, audioData, cache) {
     const mel = ensureMelForAudio(item, audioData, cache);
     const mfccParams = getItemMfccParams(item, mel.bands);
@@ -6065,23 +6089,8 @@
 
       const row = document.createElement("li");
       row.className = "stack-item";
-      row.draggable = true;
+      row.draggable = false;
       row.dataset.index = String(index);
-
-      row.addEventListener("dragstart", function (event) {
-        dragIndex = index;
-        if (event.dataTransfer) {
-          event.dataTransfer.effectAllowed = "move";
-          event.dataTransfer.setData("text/plain", String(index));
-        }
-        row.classList.add("dragging");
-      });
-
-      row.addEventListener("dragend", function () {
-        dragIndex = null;
-        row.classList.remove("dragging");
-        row.classList.remove("drag-over");
-      });
 
       row.addEventListener("dragover", function (event) {
         event.preventDefault();
@@ -6112,6 +6121,22 @@
       handle.textContent = "|||";
       handle.title = "Drag to reorder";
       handle.setAttribute("aria-label", "Drag to reorder");
+      handle.draggable = true;
+
+      handle.addEventListener("dragstart", function (event) {
+        dragIndex = index;
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", String(index));
+        }
+        row.classList.add("dragging");
+      });
+
+      handle.addEventListener("dragend", function () {
+        dragIndex = null;
+        row.classList.remove("dragging");
+        row.classList.remove("drag-over");
+      });
 
       const transformSelect = document.createElement("select");
       transformSelect.className = "transform-select";
