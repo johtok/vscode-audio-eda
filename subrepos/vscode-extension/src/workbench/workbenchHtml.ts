@@ -254,6 +254,33 @@ export function buildWorkbenchHtml(
         <p id="rcluster-status" class="hint">Ready to run r-clustering from generated short-time features.</p>
         <div id="rcluster-results" class="rcluster-results"></div>
 
+        <h2>Symbolic Pattern Forest</h2>
+        <label class="row" for="spf-source">Feature source</label>
+        <select id="spf-source">
+          <option value="mel">Short-time mel features</option>
+          <option value="stft">Short-time STFT spectrogram features</option>
+        </select>
+        <p id="spf-feature-hint" class="hint">
+          Symbolization uses generated short-time features from the current primary audio clip.
+        </p>
+        <p id="spf-label-hint" class="hint">
+          Class labels are derived from activation overlay intervals (active/inactive).
+        </p>
+        <label class="row" for="spf-alphabet-size">Alphabet size</label>
+        <input id="spf-alphabet-size" type="number" min="3" max="12" step="1" value="6" />
+        <label class="row" for="spf-word-length">Word length</label>
+        <input id="spf-word-length" type="number" min="2" max="64" step="1" value="12" />
+        <label class="row" for="spf-max-frames">Max frames</label>
+        <input id="spf-max-frames" type="number" min="128" max="8000" step="1" value="2000" />
+        <label class="row" for="spf-top-patterns">Top patterns</label>
+        <input id="spf-top-patterns" type="number" min="5" max="200" step="1" value="20" />
+        <label class="row" for="spf-forest-trees">Prototype forest trees</label>
+        <input id="spf-forest-trees" type="number" min="8" max="256" step="1" value="48" />
+        <button id="spf-run" type="button">Run symbolic pattern forest</button>
+        <progress id="spf-progress" class="spf-progress" max="100" value="0"></progress>
+        <p id="spf-status" class="hint">Ready to run symbolic pattern diagnostics.</p>
+        <div id="spf-results" class="spf-results"></div>
+
         <h2>Multichannel</h2>
         <label id="multichannel-enabled-row" class="row"><input id="multichannel-enabled" type="checkbox" /> Enable multichannel mode</label>
         <label id="multichannel-split-row" class="row">

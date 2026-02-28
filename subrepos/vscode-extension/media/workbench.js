@@ -243,6 +243,19 @@
   const rclusterStatus = byId("rcluster-status");
   const rclusterResults = byId("rcluster-results");
 
+  const spfSource = byId("spf-source");
+  const spfFeatureHint = byId("spf-feature-hint");
+  const spfLabelHint = byId("spf-label-hint");
+  const spfAlphabetSize = byId("spf-alphabet-size");
+  const spfWordLength = byId("spf-word-length");
+  const spfMaxFrames = byId("spf-max-frames");
+  const spfTopPatterns = byId("spf-top-patterns");
+  const spfForestTrees = byId("spf-forest-trees");
+  const spfRun = byId("spf-run");
+  const spfProgress = byId("spf-progress");
+  const spfStatus = byId("spf-status");
+  const spfResults = byId("spf-results");
+
   let dragIndex = null;
   let primaryAudio = null;
   let primaryAudioUrl = null;
@@ -263,6 +276,10 @@
   let rClusterRunning = false;
   let rClusterProgressIntervalId = null;
   let rClusterProgressResetTimerId = null;
+  let spfSourceMode = "mel";
+  let spfRunning = false;
+  let spfResult = null;
+  let spfLastRunContext = null;
 
   const viewStateById = Object.create(null);
   const playheadElementsByViewId = new Map();
@@ -3021,6 +3038,32 @@
     };
   }
 
+  function buildShortTimeFeatureRowsForMode(analysisAudio, representationMode) {
+    const stftDefaults = getDefaultStftParams();
+    if (representationMode === "mel") {
+      const melItem = createPcaReferenceItem("mel");
+      melItem.params.stft = cloneParams(stftDefaults);
+      melItem.params.mel = cloneParams(getDefaultMelParams(analysisAudio.sampleRate || 16000));
+      const mel = ensureMelForAudio(melItem, analysisAudio, derivedCache);
+      const stft = ensureStftForAudio(melItem, analysisAudio, derivedCache);
+      return {
+        featureRows: mel.matrix,
+        frameTimesSeconds: stft.frameTimesSeconds || [],
+        sourceDescription: "short-time mel feature frames"
+      };
+    }
+
+    const stftItem = createPcaReferenceItem("stft");
+    stftItem.params.stft = cloneParams(stftDefaults);
+    stftItem.params.stft.mode = "magnitude";
+    const stft = ensureStftForAudio(stftItem, analysisAudio, derivedCache);
+    return {
+      featureRows: stft.logMagnitudeFrames,
+      frameTimesSeconds: stft.frameTimesSeconds || [],
+      sourceDescription: "short-time STFT log-magnitude spectrogram frames"
+    };
+  }
+
   function buildRClusterDataset() {
     const analysisAudio = getSingleChannelAnalysisAudio();
     if (!analysisAudio || !analysisAudio.samples || analysisAudio.samples.length === 0) {
@@ -3034,29 +3077,10 @@
     }
 
     const representationMode = rClusterRepresentationMode === "stft" ? "stft" : "mel";
-    const stftDefaults = getDefaultStftParams();
-    let featureRows = [];
-    let frameTimesSeconds = [];
-    let sourceDescription = "";
-
-    if (representationMode === "mel") {
-      const melItem = createPcaReferenceItem("mel");
-      melItem.params.stft = cloneParams(stftDefaults);
-      melItem.params.mel = cloneParams(getDefaultMelParams(analysisAudio.sampleRate || 16000));
-      const mel = ensureMelForAudio(melItem, analysisAudio, derivedCache);
-      const stft = ensureStftForAudio(melItem, analysisAudio, derivedCache);
-      featureRows = mel.matrix;
-      frameTimesSeconds = stft.frameTimesSeconds || [];
-      sourceDescription = "short-time mel feature frames";
-    } else {
-      const stftItem = createPcaReferenceItem("stft");
-      stftItem.params.stft = cloneParams(stftDefaults);
-      stftItem.params.stft.mode = "magnitude";
-      const stft = ensureStftForAudio(stftItem, analysisAudio, derivedCache);
-      featureRows = stft.logMagnitudeFrames;
-      frameTimesSeconds = stft.frameTimesSeconds || [];
-      sourceDescription = "short-time STFT log-magnitude spectrogram frames";
-    }
+    const featureSource = buildShortTimeFeatureRowsForMode(analysisAudio, representationMode);
+    const featureRows = featureSource.featureRows;
+    const frameTimesSeconds = featureSource.frameTimesSeconds;
+    const sourceDescription = featureSource.sourceDescription;
 
     const frameCount = Math.min(featureRows.length, frameTimesSeconds.length);
     if (frameCount < 4) {
@@ -3945,6 +3969,671 @@
 
     rclusterRun.disabled = rClusterRunning || !hasAudio || !hasOverlay;
     rclusterRepresentation.disabled = rClusterRunning;
+  }
+
+  function getSpfParamsFromInputs() {
+    return {
+      source:
+        typeof spfSource.value === "string" && (spfSource.value === "mel" || spfSource.value === "stft")
+          ? spfSource.value
+          : "mel",
+      alphabetSize: sanitizeInt(spfAlphabetSize.value, 6, 3, 12),
+      wordLength: sanitizeInt(spfWordLength.value, 12, 2, 64),
+      maxFrames: sanitizeInt(spfMaxFrames.value, 2000, 128, 8000),
+      topPatterns: sanitizeInt(spfTopPatterns.value, 20, 5, 200),
+      forestTrees: sanitizeInt(spfForestTrees.value, 48, 8, 256)
+    };
+  }
+
+  function syncSpfParamsFromInputs() {
+    const params = getSpfParamsFromInputs();
+    spfSourceMode = params.source;
+    spfSource.value = params.source;
+    spfAlphabetSize.value = String(params.alphabetSize);
+    spfWordLength.value = String(params.wordLength);
+    spfMaxFrames.value = String(params.maxFrames);
+    spfTopPatterns.value = String(params.topPatterns);
+    spfForestTrees.value = String(params.forestTrees);
+    return params;
+  }
+
+  function setSpfStatus(message) {
+    spfStatus.textContent = message;
+  }
+
+  function setSpfProgress(value) {
+    const numeric = Number(value);
+    const clampedValue = Number.isFinite(numeric) ? clamp(numeric, 0, 100) : 0;
+    spfProgress.value = clampedValue;
+    spfProgress.classList.toggle("is-active", clampedValue > 0 && clampedValue < 100);
+  }
+
+  function buildSpfDataset(params) {
+    const analysisAudio = getSingleChannelAnalysisAudio();
+    if (!analysisAudio || !analysisAudio.samples || analysisAudio.samples.length === 0) {
+      throw new Error("Load a primary audio clip first.");
+    }
+    if (!state.overlay.enabled || !overlayParsed || !Array.isArray(overlayParsed.intervals)) {
+      throw new Error("Enable Activation Overlay and load overlay CSV labels first.");
+    }
+
+    const featureSource = buildShortTimeFeatureRowsForMode(analysisAudio, params.source);
+    const featureRows = featureSource.featureRows;
+    const frameTimesSeconds = featureSource.frameTimesSeconds;
+    const frameCount = Math.min(featureRows.length, frameTimesSeconds.length);
+    if (frameCount < 8) {
+      throw new Error("Not enough short-time frames for symbolic pattern analysis.");
+    }
+
+    const classSummary = buildRClusterClassLabels(
+      frameTimesSeconds.slice(0, frameCount),
+      overlayParsed.intervals
+    );
+    if (!classSummary) {
+      throw new Error("Unable to derive active/inactive frame labels from overlay.");
+    }
+    if (classSummary.activeCount < 2 || classSummary.inactiveCount < 2) {
+      throw new Error(
+        "Need at least 2 active and 2 inactive frames. active=" +
+          classSummary.activeCount +
+          ", inactive=" +
+          classSummary.inactiveCount +
+          "."
+      );
+    }
+
+    const rowStride = Math.max(1, Math.ceil(frameCount / params.maxFrames));
+    const rows = [];
+    const labels = [];
+    for (let frameIndex = 0; frameIndex < frameCount; frameIndex += rowStride) {
+      const sourceRow = featureRows[frameIndex];
+      const row = new Float32Array(sourceRow.length);
+      for (let col = 0; col < sourceRow.length; col += 1) {
+        const numeric = Number(sourceRow[col] || 0);
+        row[col] = Number.isFinite(numeric) ? numeric : 0;
+      }
+      rows.push(row);
+      labels.push(classSummary.labels[frameIndex] === "active" ? 1 : 0);
+    }
+    if (rows.length < 8) {
+      throw new Error("Not enough frames after sampling for symbolic analysis.");
+    }
+
+    let activeFrames = 0;
+    for (let index = 0; index < labels.length; index += 1) {
+      activeFrames += labels[index] ? 1 : 0;
+    }
+    const inactiveFrames = labels.length - activeFrames;
+    if (activeFrames < 2 || inactiveFrames < 2) {
+      throw new Error(
+        "Insufficient class balance after sampling. active=" +
+          activeFrames +
+          ", inactive=" +
+          inactiveFrames +
+          "."
+      );
+    }
+
+    return {
+      rows,
+      labels,
+      runContext: {
+        source: params.source,
+        sourceDescription: featureSource.sourceDescription,
+        frameCountOriginal: frameCount,
+        frameCountUsed: rows.length,
+        featureCount: rows[0] ? rows[0].length : 0,
+        rowStride,
+        activeFrames,
+        inactiveFrames,
+        overlayMode: overlayParsed.mode,
+        analysisSource: getSingleChannelAnalysisLabel(),
+        backend: "javascript"
+      }
+    };
+  }
+
+  function entropyFromCounts(positive, negative) {
+    const total = positive + negative;
+    if (total <= 0) {
+      return 0;
+    }
+    const pPos = positive / total;
+    const pNeg = negative / total;
+    let entropy = 0;
+    if (pPos > 1e-12) {
+      entropy -= pPos * Math.log2(pPos);
+    }
+    if (pNeg > 1e-12) {
+      entropy -= pNeg * Math.log2(pNeg);
+    }
+    return entropy;
+  }
+
+  function getSaxBreakpoints(alphabetSize) {
+    const table = {
+      3: [-0.43, 0.43],
+      4: [-0.67, 0, 0.67],
+      5: [-0.84, -0.25, 0.25, 0.84],
+      6: [-0.97, -0.43, 0, 0.43, 0.97],
+      7: [-1.07, -0.57, -0.18, 0.18, 0.57, 1.07],
+      8: [-1.15, -0.67, -0.32, 0, 0.32, 0.67, 1.15],
+      9: [-1.22, -0.76, -0.43, -0.14, 0.14, 0.43, 0.76, 1.22],
+      10: [-1.28, -0.84, -0.52, -0.25, 0, 0.25, 0.52, 0.84, 1.28],
+      11: [-1.34, -0.91, -0.6, -0.35, -0.11, 0.11, 0.35, 0.6, 0.91, 1.34],
+      12: [-1.39, -0.97, -0.67, -0.43, -0.21, 0, 0.21, 0.43, 0.67, 0.97, 1.39]
+    };
+    if (table[alphabetSize]) {
+      return table[alphabetSize];
+    }
+    const breakpoints = [];
+    const min = -1.5;
+    const max = 1.5;
+    for (let index = 1; index < alphabetSize; index += 1) {
+      breakpoints.push(min + ((max - min) * index) / alphabetSize);
+    }
+    return breakpoints;
+  }
+
+  function normalizeVectorZScore(vector) {
+    const length = vector.length;
+    if (length <= 0) {
+      return new Float32Array(0);
+    }
+    let mean = 0;
+    for (let index = 0; index < length; index += 1) {
+      mean += vector[index];
+    }
+    mean /= length;
+    let variance = 0;
+    for (let index = 0; index < length; index += 1) {
+      const delta = vector[index] - mean;
+      variance += delta * delta;
+    }
+    const std = variance > 1e-12 ? Math.sqrt(variance / length) : 1;
+    const normalized = new Float32Array(length);
+    for (let index = 0; index < length; index += 1) {
+      normalized[index] = (vector[index] - mean) / std;
+    }
+    return normalized;
+  }
+
+  function computePaaVector(vector, segments) {
+    const safeSegments = Math.max(1, Math.min(segments, vector.length));
+    const paa = new Float32Array(safeSegments);
+    for (let segment = 0; segment < safeSegments; segment += 1) {
+      const start = Math.floor((segment * vector.length) / safeSegments);
+      const end = Math.floor(((segment + 1) * vector.length) / safeSegments);
+      let sum = 0;
+      let count = 0;
+      for (let index = start; index < end; index += 1) {
+        sum += vector[index];
+        count += 1;
+      }
+      paa[segment] = count > 0 ? sum / count : 0;
+    }
+    return paa;
+  }
+
+  function quantizeToSymbol(value, breakpoints, alphabetSymbols) {
+    let bin = 0;
+    while (bin < breakpoints.length && value > breakpoints[bin]) {
+      bin += 1;
+    }
+    return alphabetSymbols[bin] || alphabetSymbols[alphabetSymbols.length - 1];
+  }
+
+  function giniImpurity(positive, negative) {
+    const total = positive + negative;
+    if (total <= 0) {
+      return 0;
+    }
+    const p = positive / total;
+    const q = negative / total;
+    return 1 - (p * p + q * q);
+  }
+
+  function buildSymbolicWords(rows, alphabetSize, wordLength) {
+    const alphabetSymbols = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+      .slice(0, alphabetSize)
+      .split("");
+    const breakpoints = getSaxBreakpoints(alphabetSize);
+    const words = new Array(rows.length);
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+      const normalized = normalizeVectorZScore(rows[rowIndex]);
+      const paa = computePaaVector(normalized, wordLength);
+      let word = "";
+      for (let index = 0; index < paa.length; index += 1) {
+        word += quantizeToSymbol(paa[index], breakpoints, alphabetSymbols);
+      }
+      words[rowIndex] = word;
+    }
+    return words;
+  }
+
+  function buildPatternStats(words, labels) {
+    const totalCount = words.length;
+    let activeTotal = 0;
+    for (let index = 0; index < labels.length; index += 1) {
+      activeTotal += labels[index] ? 1 : 0;
+    }
+    const inactiveTotal = totalCount - activeTotal;
+    const entropyY = entropyFromCounts(activeTotal, inactiveTotal);
+
+    const statsByWord = new Map();
+    for (let index = 0; index < words.length; index += 1) {
+      const word = words[index];
+      if (!statsByWord.has(word)) {
+        statsByWord.set(word, { total: 0, active: 0, inactive: 0 });
+      }
+      const entry = statsByWord.get(word);
+      entry.total += 1;
+      if (labels[index]) {
+        entry.active += 1;
+      } else {
+        entry.inactive += 1;
+      }
+    }
+
+    const patterns = [];
+    statsByWord.forEach(function (entry, word) {
+      const present = entry.total;
+      const absent = totalCount - present;
+      const activePresent = entry.active;
+      const inactivePresent = entry.inactive;
+      const activeAbsent = activeTotal - activePresent;
+      const inactiveAbsent = inactiveTotal - inactivePresent;
+
+      const conditionalEntropy =
+        (present / totalCount) * entropyFromCounts(activePresent, inactivePresent) +
+        (absent / totalCount) * entropyFromCounts(activeAbsent, inactiveAbsent);
+      const infoGain = entropyY - conditionalEntropy;
+
+      const expectedActivePresent = (present * activeTotal) / Math.max(1, totalCount);
+      const expectedInactivePresent = (present * inactiveTotal) / Math.max(1, totalCount);
+      const expectedActiveAbsent = (absent * activeTotal) / Math.max(1, totalCount);
+      const expectedInactiveAbsent = (absent * inactiveTotal) / Math.max(1, totalCount);
+      const chiSquare =
+        ((activePresent - expectedActivePresent) ** 2) / Math.max(1e-12, expectedActivePresent) +
+        ((inactivePresent - expectedInactivePresent) ** 2) / Math.max(1e-12, expectedInactivePresent) +
+        ((activeAbsent - expectedActiveAbsent) ** 2) / Math.max(1e-12, expectedActiveAbsent) +
+        ((inactiveAbsent - expectedInactiveAbsent) ** 2) / Math.max(1e-12, expectedInactiveAbsent);
+
+      const activeOdds = (activePresent + 0.5) / (Math.max(0, activeTotal - activePresent) + 0.5);
+      const inactiveOdds = (inactivePresent + 0.5) / (Math.max(0, inactiveTotal - inactivePresent) + 0.5);
+      const logOdds = Math.log(activeOdds) - Math.log(inactiveOdds);
+
+      patterns.push({
+        word,
+        total: entry.total,
+        active: entry.active,
+        inactive: entry.inactive,
+        support: entry.total / Math.max(1, totalCount),
+        activeSupport: entry.active / Math.max(1, activeTotal),
+        inactiveSupport: entry.inactive / Math.max(1, inactiveTotal),
+        infoGain,
+        chiSquare,
+        logOdds
+      });
+    });
+
+    patterns.sort(function (left, right) {
+      if (right.infoGain !== left.infoGain) {
+        return right.infoGain - left.infoGain;
+      }
+      if (right.chiSquare !== left.chiSquare) {
+        return right.chiSquare - left.chiSquare;
+      }
+      return right.total - left.total;
+    });
+
+    return {
+      patterns,
+      totalCount,
+      activeTotal,
+      inactiveTotal,
+      entropyY,
+      uniquePatterns: patterns.length
+    };
+  }
+
+  function runPrototypeSymbolicForest(words, labels, rankedPatterns, treeCount, seed) {
+    const maxVocab = Math.min(256, rankedPatterns.length);
+    const vocabulary = rankedPatterns.slice(0, maxVocab).map(function (pattern) {
+      return pattern.word;
+    });
+    const wordToFeatureIndex = new Map();
+    vocabulary.forEach(function (word, index) {
+      wordToFeatureIndex.set(word, index);
+    });
+
+    const encoded = new Int32Array(words.length);
+    for (let index = 0; index < words.length; index += 1) {
+      const mapped = wordToFeatureIndex.get(words[index]);
+      encoded[index] = typeof mapped === "number" ? mapped : -1;
+    }
+
+    const featureImportance = new Float64Array(vocabulary.length);
+    const votePositive = new Uint16Array(words.length);
+    const voteNegative = new Uint16Array(words.length);
+    const oobCounts = new Uint16Array(words.length);
+    const random = createSeededRandom(seed);
+
+    let fittedTrees = 0;
+    for (let tree = 0; tree < treeCount; tree += 1) {
+      if (vocabulary.length === 0) {
+        break;
+      }
+
+      const bootstrapIndices = new Int32Array(words.length);
+      const inBag = new Uint8Array(words.length);
+      for (let sample = 0; sample < words.length; sample += 1) {
+        const picked = Math.floor(random() * words.length);
+        bootstrapIndices[sample] = picked;
+        inBag[picked] = 1;
+      }
+
+      let parentPos = 0;
+      let parentNeg = 0;
+      for (let sample = 0; sample < bootstrapIndices.length; sample += 1) {
+        if (labels[bootstrapIndices[sample]]) {
+          parentPos += 1;
+        } else {
+          parentNeg += 1;
+        }
+      }
+      const parentGini = giniImpurity(parentPos, parentNeg);
+      const mtry = Math.max(1, Math.floor(Math.sqrt(vocabulary.length)));
+      const candidateFeatureIndices = sampleIndicesWithoutReplacement(vocabulary.length, mtry, random);
+
+      let bestFeature = -1;
+      let bestGain = 0;
+      let bestLeftPos = 0;
+      let bestLeftNeg = 0;
+      let bestRightPos = 0;
+      let bestRightNeg = 0;
+
+      for (let candidateIndex = 0; candidateIndex < candidateFeatureIndices.length; candidateIndex += 1) {
+        const featureIndex = candidateFeatureIndices[candidateIndex];
+        let leftPos = 0;
+        let leftNeg = 0;
+        let rightPos = 0;
+        let rightNeg = 0;
+        for (let sample = 0; sample < bootstrapIndices.length; sample += 1) {
+          const rowIndex = bootstrapIndices[sample];
+          const present = encoded[rowIndex] === featureIndex;
+          if (present) {
+            if (labels[rowIndex]) {
+              leftPos += 1;
+            } else {
+              leftNeg += 1;
+            }
+          } else if (labels[rowIndex]) {
+            rightPos += 1;
+          } else {
+            rightNeg += 1;
+          }
+        }
+        const leftCount = leftPos + leftNeg;
+        const rightCount = rightPos + rightNeg;
+        if (leftCount === 0 || rightCount === 0) {
+          continue;
+        }
+        const weightedGini =
+          (leftCount / words.length) * giniImpurity(leftPos, leftNeg) +
+          (rightCount / words.length) * giniImpurity(rightPos, rightNeg);
+        const gain = parentGini - weightedGini;
+        if (gain > bestGain) {
+          bestGain = gain;
+          bestFeature = featureIndex;
+          bestLeftPos = leftPos;
+          bestLeftNeg = leftNeg;
+          bestRightPos = rightPos;
+          bestRightNeg = rightNeg;
+        }
+      }
+
+      if (bestFeature < 0) {
+        continue;
+      }
+
+      fittedTrees += 1;
+      featureImportance[bestFeature] += bestGain;
+      const leftPrediction = bestLeftPos >= bestLeftNeg ? 1 : 0;
+      const rightPrediction = bestRightPos >= bestRightNeg ? 1 : 0;
+
+      for (let rowIndex = 0; rowIndex < words.length; rowIndex += 1) {
+        if (inBag[rowIndex]) {
+          continue;
+        }
+        oobCounts[rowIndex] += 1;
+        const prediction = encoded[rowIndex] === bestFeature ? leftPrediction : rightPrediction;
+        if (prediction) {
+          votePositive[rowIndex] += 1;
+        } else {
+          voteNegative[rowIndex] += 1;
+        }
+      }
+    }
+
+    let evaluated = 0;
+    let correct = 0;
+    let tp = 0;
+    let tn = 0;
+    let fp = 0;
+    let fn = 0;
+    for (let index = 0; index < words.length; index += 1) {
+      if (oobCounts[index] <= 0) {
+        continue;
+      }
+      evaluated += 1;
+      const prediction = votePositive[index] >= voteNegative[index] ? 1 : 0;
+      const target = labels[index];
+      if (prediction === target) {
+        correct += 1;
+      }
+      if (prediction === 1 && target === 1) {
+        tp += 1;
+      } else if (prediction === 0 && target === 0) {
+        tn += 1;
+      } else if (prediction === 1 && target === 0) {
+        fp += 1;
+      } else if (prediction === 0 && target === 1) {
+        fn += 1;
+      }
+    }
+
+    const rankedImportance = [];
+    for (let featureIndex = 0; featureIndex < vocabulary.length; featureIndex += 1) {
+      if (featureImportance[featureIndex] <= 0) {
+        continue;
+      }
+      rankedImportance.push({
+        word: vocabulary[featureIndex],
+        importance: featureImportance[featureIndex]
+      });
+    }
+    rankedImportance.sort(function (left, right) {
+      return right.importance - left.importance;
+    });
+
+    return {
+      vocabularySize: vocabulary.length,
+      fittedTrees,
+      requestedTrees: treeCount,
+      evaluatedSamples: evaluated,
+      oobAccuracy: evaluated > 0 ? correct / evaluated : 0,
+      confusion: { tp, tn, fp, fn },
+      patternImportances: rankedImportance
+    };
+  }
+
+  async function runSpfInBrowserLocal(dataset, params) {
+    setSpfProgress(18);
+    await waitForUiFrame();
+    const words = buildSymbolicWords(dataset.rows, params.alphabetSize, params.wordLength);
+
+    setSpfProgress(48);
+    await waitForUiFrame();
+    const patternStats = buildPatternStats(words, dataset.labels);
+
+    setSpfProgress(70);
+    await waitForUiFrame();
+    const forest = runPrototypeSymbolicForest(
+      words,
+      dataset.labels,
+      patternStats.patterns,
+      params.forestTrees,
+      10007 + params.forestTrees + params.wordLength + params.alphabetSize
+    );
+
+    setSpfProgress(94);
+    await waitForUiFrame();
+    const topPatterns = patternStats.patterns.slice(0, params.topPatterns);
+    return {
+      command: "symbolic-pattern-forest",
+      schema_version: "0.1.0-js",
+      status: "ok",
+      input: {
+        sample_count: dataset.rows.length,
+        feature_count: dataset.rows[0] ? dataset.rows[0].length : 0,
+        active_count: patternStats.activeTotal,
+        inactive_count: patternStats.inactiveTotal
+      },
+      params: {
+        source: params.source,
+        alphabet_size: params.alphabetSize,
+        word_length: params.wordLength,
+        max_frames: params.maxFrames,
+        top_patterns: params.topPatterns,
+        forest_trees: params.forestTrees,
+        backend: "javascript"
+      },
+      diagnostics: {
+        unique_patterns: patternStats.uniquePatterns,
+        class_entropy: patternStats.entropyY,
+        forest
+      },
+      top_patterns: topPatterns
+    };
+  }
+
+  function renderSpfResults() {
+    if (!spfResults) {
+      return;
+    }
+    spfResults.innerHTML = "";
+    if (!spfResult || typeof spfResult !== "object") {
+      spfResults.appendChild(
+        createMetricsGroup("Symbolic Pattern Forest", [["Status", "Run symbolic pattern analysis to view diagnostics."]])
+      );
+      return;
+    }
+
+    const result = asRecord(spfResult);
+    if (!result) {
+      spfResults.appendChild(
+        createMetricsGroup("Symbolic Pattern Forest", [["Status", "Invalid symbolic result payload."]])
+      );
+      return;
+    }
+
+    const input = asRecord(result.input);
+    const params = asRecord(result.params);
+    const diagnostics = asRecord(result.diagnostics);
+    const forest = diagnostics ? asRecord(diagnostics.forest) : null;
+    const topPatterns = Array.isArray(result.top_patterns) ? result.top_patterns : [];
+
+    spfResults.appendChild(
+      createMetricsGroup("SPF Input", [
+        ["Source", spfLastRunContext && spfLastRunContext.sourceDescription ? spfLastRunContext.sourceDescription : "n/a"],
+        [
+          "Frames / features",
+          String(sanitizeInt(input && input.sample_count, 0, 0, 1000000000)) +
+            " / " +
+            String(sanitizeInt(input && input.feature_count, 0, 0, 1000000000))
+        ],
+        [
+          "Classes (active / inactive)",
+          String(sanitizeInt(input && input.active_count, 0, 0, 1000000000)) +
+            " / " +
+            String(sanitizeInt(input && input.inactive_count, 0, 0, 1000000000))
+        ],
+        ["Analysis channel", spfLastRunContext && spfLastRunContext.analysisSource ? spfLastRunContext.analysisSource : getSingleChannelAnalysisLabel()],
+        [
+          "Alphabet / word length",
+          String(sanitizeInt(params && params.alphabet_size, 0, 0, 1000)) +
+            " / " +
+            String(sanitizeInt(params && params.word_length, 0, 0, 1000))
+        ]
+      ])
+    );
+
+    spfResults.appendChild(
+      createMetricsGroup("SPF Diagnostics", [
+        ["Unique patterns", String(sanitizeInt(diagnostics && diagnostics.unique_patterns, 0, 0, 1000000000))],
+        ["Class entropy", formatMetricNumber(Number(diagnostics && diagnostics.class_entropy), 5)],
+        ["Forest trees (fit/requested)", String(sanitizeInt(forest && forest.fittedTrees, 0, 0, 1000000)) + " / " + String(sanitizeInt(forest && forest.requestedTrees, 0, 0, 1000000))],
+        ["Prototype OOB accuracy", formatMetricPercent(Number(forest && forest.oobAccuracy))],
+        ["OOB evaluated samples", String(sanitizeInt(forest && forest.evaluatedSamples, 0, 0, 1000000000))]
+      ])
+    );
+
+    if (forest && asRecord(forest.confusion)) {
+      const confusion = asRecord(forest.confusion);
+      spfResults.appendChild(
+        createMetricsGroup("Prototype Forest Confusion (OOB)", [
+          ["TP", String(sanitizeInt(confusion && confusion.tp, 0, 0, 1000000000))],
+          ["TN", String(sanitizeInt(confusion && confusion.tn, 0, 0, 1000000000))],
+          ["FP", String(sanitizeInt(confusion && confusion.fp, 0, 0, 1000000000))],
+          ["FN", String(sanitizeInt(confusion && confusion.fn, 0, 0, 1000000000))]
+        ])
+      );
+    }
+
+    for (let index = 0; index < topPatterns.length; index += 1) {
+      const pattern = asRecord(topPatterns[index]);
+      if (!pattern) {
+        continue;
+      }
+      spfResults.appendChild(
+        createMetricsGroup("Pattern " + (index + 1), [
+          ["Word", String(pattern.word || "")],
+          ["Support", formatMetricPercent(Number(pattern.support))],
+          ["Active / inactive count", String(sanitizeInt(pattern.active, 0, 0, 1000000000)) + " / " + String(sanitizeInt(pattern.inactive, 0, 0, 1000000000))],
+          ["Info gain", formatMetricNumber(Number(pattern.infoGain), 6)],
+          ["Chi-square", formatMetricNumber(Number(pattern.chiSquare), 4)],
+          ["Log-odds(active vs inactive)", formatMetricNumber(Number(pattern.logOdds), 4)]
+        ])
+      );
+    }
+  }
+
+  function updateSpfControls() {
+    const hasAudio = Boolean(primaryAudio && primaryAudio.samples && primaryAudio.samples.length > 0);
+    const hasOverlay = Boolean(state.overlay.enabled && overlayParsed && overlayParsed.intervals.length > 0);
+
+    spfFeatureHint.textContent =
+      "Symbol source: " +
+      (spfSourceMode === "stft"
+        ? "short-time STFT log-magnitude spectrogram frames"
+        : "short-time mel feature frames") +
+      ". Backend: in-browser JavaScript.";
+    spfLabelHint.textContent = hasOverlay
+      ? "Activation overlay loaded: " +
+        overlayParsed.intervals.length +
+        " intervals, mode=" +
+        overlayParsed.mode +
+        "."
+      : "Activation overlay required to derive active/inactive labels.";
+
+    spfRun.disabled = spfRunning || !hasAudio || !hasOverlay;
+    spfSource.disabled = spfRunning;
+    spfAlphabetSize.disabled = spfRunning;
+    spfWordLength.disabled = spfRunning;
+    spfMaxFrames.disabled = spfRunning;
+    spfTopPatterns.disabled = spfRunning;
+    spfForestTrees.disabled = spfRunning;
   }
 
   function getHistogramCanvasContext(canvas) {
@@ -10162,6 +10851,7 @@
       renderStackContainer.appendChild(empty);
       renderMetricsReport();
       updateRClusterControls();
+      updateSpfControls();
       return;
     }
 
@@ -10402,6 +11092,7 @@
     updateAnimatedPlayheads();
     renderMetricsReport();
     updateRClusterControls();
+    updateSpfControls();
   }
 
   function updateAnimatedPlayheads() {
@@ -10540,6 +11231,7 @@
     if (message.type === "rClusterRunStarted") {
       rClusterRunning = true;
       updateRClusterControls();
+      updateSpfControls();
       startRClusterProgress(Math.max(30, Number(rclusterProgress.value) || 0));
       setRClusterStatus("Running r-clustering...");
       return;
@@ -10553,6 +11245,7 @@
       rClusterResult = resultPayload || null;
       rClusterLastRunContext = runContext || rClusterLastRunContext;
       updateRClusterControls();
+      updateSpfControls();
       completeRClusterProgress();
 
       const diagnostics = resultPayload ? asRecord(resultPayload.diagnostics) : null;
@@ -10574,6 +11267,7 @@
       const payload = asRecord(message.payload);
       rClusterRunning = false;
       updateRClusterControls();
+      updateSpfControls();
       failRClusterProgress();
       const errorMessage = sanitizeStringValue(payload && payload.message, 2048);
       setRClusterStatus("r-clustering failed: " + (errorMessage || "Unknown toolbox error."));
@@ -10852,6 +11546,7 @@
   function syncRClusterParamsAndControls() {
     syncRClusterParamInputs();
     updateRClusterControls();
+    updateSpfControls();
   }
 
   rclusterRepresentation.addEventListener("change", function () {
@@ -10927,13 +11622,91 @@
     );
   }
 
+  function syncSpfParamsAndControls() {
+    syncSpfParamsFromInputs();
+    updateSpfControls();
+  }
+
+  [
+    spfSource,
+    spfAlphabetSize,
+    spfWordLength,
+    spfMaxFrames,
+    spfTopPatterns,
+    spfForestTrees
+  ].forEach(function (input) {
+    input.addEventListener("change", syncSpfParamsAndControls);
+  });
+
+  spfRun.addEventListener("click", function () {
+    if (spfRunning) {
+      return;
+    }
+
+    const params = syncSpfParamsFromInputs();
+    let dataset;
+    try {
+      dataset = buildSpfDataset(params);
+    } catch (error) {
+      setSpfProgress(0);
+      setSpfStatus("SPF prerequisites failed: " + toErrorText(error));
+      return;
+    }
+
+    spfLastRunContext = dataset.runContext;
+    spfRunning = true;
+    updateSpfControls();
+    setSpfStatus("Running symbolic pattern forest (JavaScript backend)...");
+    setSpfProgress(8);
+
+    void runSpfInBrowserLocal(dataset, params)
+      .then(function (result) {
+        spfRunning = false;
+        spfResult = result;
+        updateSpfControls();
+        setSpfProgress(100);
+        window.setTimeout(function () {
+          if (!spfRunning) {
+            setSpfProgress(0);
+          }
+        }, 700);
+
+        const diagnostics = asRecord(result.diagnostics);
+        const forest = diagnostics ? asRecord(diagnostics.forest) : null;
+        setSpfStatus(
+          "SPF complete (JS). unique_patterns=" +
+            String(sanitizeInt(diagnostics && diagnostics.unique_patterns, 0, 0, 1000000000)) +
+            ", oob_accuracy=" +
+            formatMetricPercent(Number(forest && forest.oobAccuracy)) +
+            "."
+        );
+        renderSpfResults();
+      })
+      .catch(function (error) {
+        spfRunning = false;
+        updateSpfControls();
+        setSpfProgress(0);
+        setSpfStatus("SPF failed: " + toErrorText(error));
+      });
+  });
+
+  if (spfStatus.textContent.trim().length === 0) {
+    setSpfStatus("Ready to run symbolic pattern diagnostics.");
+  } else {
+    setSpfStatus("Ready to run symbolic pattern diagnostics (JavaScript backend).");
+  }
+
   window.addEventListener("resize", scheduleRenderTransformStack);
 
   syncControlsFromState();
   syncRClusterParamInputs();
+  syncSpfParamsFromInputs();
   updateRClusterControls();
+  updateSpfControls();
   setRClusterProgress(0);
+  setSpfProgress(0);
   renderRClusterResults();
+  renderSpfResults();
   if (state.comparison.secondAudioName) {
     setComparisonStatus(
       "Second clip remembered as " +

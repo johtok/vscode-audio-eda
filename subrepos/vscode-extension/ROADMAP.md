@@ -165,6 +165,8 @@ Delivery slices:
 
 Goal: add symbolic sequence mining/classification diagnostics using Symbolic Pattern Forest concepts.
 
+Status: `in progress` (JS symbolic transform + pattern importance explorer + prototype forest OOB diagnostics added in workbench).
+
 Reference:
 
 - https://www.ijcai.org/proceedings/2019/0406.pdf
