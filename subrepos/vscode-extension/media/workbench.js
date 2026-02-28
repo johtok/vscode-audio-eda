@@ -59,6 +59,8 @@
   const MAX_FILTERBANK_CSV_INPUT_BYTES = 2 * 1024 * 1024;
   const MAX_FILTERBANK_ROWS = 2048;
   const MAX_FILTERBANK_COLUMNS = 8192;
+  const RCLUSTER_MAX_ROWS = 2500;
+  const RCLUSTER_MAX_COLUMNS = 256;
   const METRICS_HISTOGRAM_BINS = 128;
   const METRICS_HISTOGRAM_RANGE_MIN = -10;
   const METRICS_HISTOGRAM_RANGE_MAX = 10;
@@ -227,6 +229,20 @@
   const multichannelSplitRow = byId("multichannel-split-row");
   const multichannelAnalysisRow = byId("multichannel-analysis-row");
 
+  const rclusterRepresentation = byId("rcluster-representation");
+  const rclusterFeaturePath = byId("rcluster-feature-path");
+  const rclusterLabelsPath = byId("rcluster-labels-path");
+  const rclusterK = byId("rcluster-k");
+  const rclusterSeed = byId("rcluster-seed");
+  const rclusterMaxIter = byId("rcluster-max-iter");
+  const rclusterStabilityRuns = byId("rcluster-stability-runs");
+  const rclusterRowRatio = byId("rcluster-row-ratio");
+  const rclusterFeatureRatio = byId("rcluster-feature-ratio");
+  const rclusterRun = byId("rcluster-run");
+  const rclusterProgress = byId("rcluster-progress");
+  const rclusterStatus = byId("rcluster-status");
+  const rclusterResults = byId("rcluster-results");
+
   let dragIndex = null;
   let primaryAudio = null;
   let primaryAudioUrl = null;
@@ -242,6 +258,11 @@
   let resizeTick = 0;
   let selectedViewId = null;
   const expandedRowSettingsIds = new Set();
+  let rClusterRepresentationMode = "mel";
+  let rClusterResult = null;
+  let rClusterRunning = false;
+  let rClusterProgressIntervalId = null;
+  let rClusterProgressResetTimerId = null;
 
   const viewStateById = Object.create(null);
   const playheadElementsByViewId = new Map();
@@ -2857,6 +2878,1073 @@
     table.appendChild(body);
     group.appendChild(table);
     return group;
+  }
+
+  function getRClusterParamsFromInputs() {
+    const params = {
+      k: sanitizeInt(rclusterK.value, 2, 2, 64),
+      seed: sanitizeInt(rclusterSeed.value, 0, -2147483648, 2147483647),
+      maxIter: sanitizeInt(rclusterMaxIter.value, 32, 4, 512),
+      stabilityRuns: sanitizeInt(rclusterStabilityRuns.value, 6, 1, 48),
+      rowRatio: sanitizeFloat(rclusterRowRatio.value, 0.8, 0.1, 1),
+      featureRatio: sanitizeFloat(rclusterFeatureRatio.value, 0.8, 0.1, 1)
+    };
+    return params;
+  }
+
+  function syncRClusterParamInputs() {
+    const params = getRClusterParamsFromInputs();
+    const representation =
+      typeof rclusterRepresentation.value === "string" &&
+      (rclusterRepresentation.value === "mel" || rclusterRepresentation.value === "stft")
+        ? rclusterRepresentation.value
+        : "mel";
+    rClusterRepresentationMode = representation;
+    rclusterRepresentation.value = representation;
+    rclusterK.value = String(params.k);
+    rclusterSeed.value = String(params.seed);
+    rclusterMaxIter.value = String(params.maxIter);
+    rclusterStabilityRuns.value = String(params.stabilityRuns);
+    rclusterRowRatio.value = formatMetricNumber(params.rowRatio, 2);
+    rclusterFeatureRatio.value = formatMetricNumber(params.featureRatio, 2);
+  }
+
+  function setRClusterStatus(message) {
+    rclusterStatus.textContent = message;
+  }
+
+  function clearRClusterProgressInterval() {
+    if (rClusterProgressIntervalId !== null) {
+      window.clearInterval(rClusterProgressIntervalId);
+      rClusterProgressIntervalId = null;
+    }
+  }
+
+  function clearRClusterProgressResetTimer() {
+    if (rClusterProgressResetTimerId !== null) {
+      window.clearTimeout(rClusterProgressResetTimerId);
+      rClusterProgressResetTimerId = null;
+    }
+  }
+
+  function setRClusterProgress(value) {
+    const numeric = Number(value);
+    const clampedValue = Number.isFinite(numeric) ? clamp(numeric, 0, 100) : 0;
+    rclusterProgress.value = clampedValue;
+    rclusterProgress.classList.toggle("is-active", clampedValue > 0 && clampedValue < 100);
+  }
+
+  function startRClusterProgress(initialValue) {
+    clearRClusterProgressInterval();
+    clearRClusterProgressResetTimer();
+    const numericInitial = Number(initialValue);
+    const clampedInitial = Number.isFinite(numericInitial) ? clamp(numericInitial, 0, 100) : 0;
+    setRClusterProgress(clampedInitial);
+    rClusterProgressIntervalId = window.setInterval(function () {
+      const current = Number(rclusterProgress.value) || 0;
+      const next = Math.min(92, current + Math.max(0.8, (92 - current) * 0.08));
+      setRClusterProgress(next);
+    }, 220);
+  }
+
+  function completeRClusterProgress() {
+    clearRClusterProgressInterval();
+    clearRClusterProgressResetTimer();
+    setRClusterProgress(100);
+    rClusterProgressResetTimerId = window.setTimeout(function () {
+      if (!rClusterRunning) {
+        setRClusterProgress(0);
+      }
+      rClusterProgressResetTimerId = null;
+    }, 850);
+  }
+
+  function failRClusterProgress() {
+    clearRClusterProgressInterval();
+    clearRClusterProgressResetTimer();
+    setRClusterProgress(0);
+  }
+
+  let rClusterLastRunContext = null;
+
+  function buildRClusterClassLabels(frameTimesSeconds, intervals) {
+    if (!Array.isArray(frameTimesSeconds) || frameTimesSeconds.length === 0) {
+      return null;
+    }
+    if (!Array.isArray(intervals) || intervals.length === 0) {
+      return null;
+    }
+
+    const labels = new Array(frameTimesSeconds.length);
+    let activeCount = 0;
+    let inactiveCount = 0;
+    let intervalIndex = 0;
+
+    for (let index = 0; index < frameTimesSeconds.length; index += 1) {
+      const timeSeconds = Number(frameTimesSeconds[index]);
+      if (!Number.isFinite(timeSeconds)) {
+        labels[index] = "inactive";
+        inactiveCount += 1;
+        continue;
+      }
+
+      while (
+        intervalIndex < intervals.length &&
+        Number.isFinite(intervals[intervalIndex].endSec) &&
+        intervals[intervalIndex].endSec < timeSeconds - 1e-9
+      ) {
+        intervalIndex += 1;
+      }
+
+      let isActive = false;
+      if (intervalIndex < intervals.length) {
+        const interval = intervals[intervalIndex];
+        isActive =
+          Number.isFinite(interval.startSec) &&
+          Number.isFinite(interval.endSec) &&
+          interval.startSec <= timeSeconds + 1e-9 &&
+          interval.endSec >= timeSeconds - 1e-9;
+      }
+
+      labels[index] = isActive ? "active" : "inactive";
+      if (isActive) {
+        activeCount += 1;
+      } else {
+        inactiveCount += 1;
+      }
+    }
+
+    return {
+      labels,
+      activeCount,
+      inactiveCount
+    };
+  }
+
+  function buildRClusterDataset() {
+    const analysisAudio = getSingleChannelAnalysisAudio();
+    if (!analysisAudio || !analysisAudio.samples || analysisAudio.samples.length === 0) {
+      throw new Error("Load a primary audio clip first.");
+    }
+
+    if (!state.overlay.enabled || !overlayParsed || !Array.isArray(overlayParsed.intervals)) {
+      throw new Error(
+        "Enable Activation Overlay and load a valid overlay CSV to derive active/inactive labels."
+      );
+    }
+
+    const representationMode = rClusterRepresentationMode === "stft" ? "stft" : "mel";
+    const stftDefaults = getDefaultStftParams();
+    let featureRows = [];
+    let frameTimesSeconds = [];
+    let sourceDescription = "";
+
+    if (representationMode === "mel") {
+      const melItem = createPcaReferenceItem("mel");
+      melItem.params.stft = cloneParams(stftDefaults);
+      melItem.params.mel = cloneParams(getDefaultMelParams(analysisAudio.sampleRate || 16000));
+      const mel = ensureMelForAudio(melItem, analysisAudio, derivedCache);
+      const stft = ensureStftForAudio(melItem, analysisAudio, derivedCache);
+      featureRows = mel.matrix;
+      frameTimesSeconds = stft.frameTimesSeconds || [];
+      sourceDescription = "short-time mel feature frames";
+    } else {
+      const stftItem = createPcaReferenceItem("stft");
+      stftItem.params.stft = cloneParams(stftDefaults);
+      stftItem.params.stft.mode = "magnitude";
+      const stft = ensureStftForAudio(stftItem, analysisAudio, derivedCache);
+      featureRows = stft.logMagnitudeFrames;
+      frameTimesSeconds = stft.frameTimesSeconds || [];
+      sourceDescription = "short-time STFT log-magnitude spectrogram frames";
+    }
+
+    const frameCount = Math.min(featureRows.length, frameTimesSeconds.length);
+    if (frameCount < 4) {
+      throw new Error("Not enough short-time frames for clustering. Load longer audio or adjust STFT settings.");
+    }
+
+    const classLabels = buildRClusterClassLabels(
+      frameTimesSeconds.slice(0, frameCount),
+      overlayParsed.intervals
+    );
+    if (!classLabels) {
+      throw new Error("Unable to derive class labels from activation overlay.");
+    }
+    if (classLabels.activeCount < 2 || classLabels.inactiveCount < 2) {
+      throw new Error(
+        "Need at least 2 active and 2 inactive frames for classwise diagnostics. " +
+          "active=" +
+          classLabels.activeCount +
+          ", inactive=" +
+          classLabels.inactiveCount +
+          "."
+      );
+    }
+
+    const rowStride = Math.max(1, Math.ceil(frameCount / RCLUSTER_MAX_ROWS));
+    const sampledRows = [];
+    const sampledLabels = [];
+    for (let rowIndex = 0; rowIndex < frameCount; rowIndex += rowStride) {
+      sampledRows.push(featureRows[rowIndex]);
+      sampledLabels.push(classLabels.labels[rowIndex]);
+    }
+    if (sampledRows.length < 2) {
+      throw new Error("Not enough frames after sampling for clustering.");
+    }
+
+    const sourceFeatureCount = sampledRows[0] ? sampledRows[0].length : 0;
+    const outputFeatureCount = Math.min(RCLUSTER_MAX_COLUMNS, Math.max(1, sourceFeatureCount));
+
+    const featureHeader = new Array(outputFeatureCount);
+    for (let index = 0; index < outputFeatureCount; index += 1) {
+      featureHeader[index] = representationMode + "_f" + index;
+    }
+    const processedRows = new Array(sampledRows.length);
+    for (let rowIndex = 0; rowIndex < sampledRows.length; rowIndex += 1) {
+      const sourceRow = sampledRows[rowIndex];
+      const values =
+        sourceRow.length > outputFeatureCount
+          ? resampleVectorToLength(sourceRow, outputFeatureCount)
+          : sourceRow;
+      const processedRow = new Float32Array(outputFeatureCount);
+      for (let colIndex = 0; colIndex < outputFeatureCount; colIndex += 1) {
+        const numeric = Number(values[colIndex] || 0);
+        processedRow[colIndex] = Number.isFinite(numeric) ? numeric : 0;
+      }
+      processedRows[rowIndex] = processedRow;
+    }
+
+    return {
+      rows: processedRows,
+      classLabels: sampledLabels,
+      featureColumns: featureHeader,
+      runContext: {
+        representationMode,
+        sourceDescription,
+        frameCountOriginal: frameCount,
+        frameCountUsed: sampledRows.length,
+        rowStride,
+        featureCountOriginal: sourceFeatureCount,
+        featureCountUsed: outputFeatureCount,
+        activeFrames: sampledLabels.reduce(function (acc, label) {
+          return acc + (label === "active" ? 1 : 0);
+        }, 0),
+        inactiveFrames: sampledLabels.reduce(function (acc, label) {
+          return acc + (label === "inactive" ? 1 : 0);
+        }, 0),
+        analysisSource: getSingleChannelAnalysisLabel(),
+        overlayMode: overlayParsed.mode,
+        backend: "javascript"
+      }
+    };
+  }
+
+  function waitForUiFrame() {
+    return new Promise(function (resolve) {
+      window.requestAnimationFrame(function () {
+        resolve();
+      });
+    });
+  }
+
+  function createSeededRandom(seed) {
+    let state = (seed | 0) ^ 0x9e3779b9;
+    return function () {
+      state = (state + 0x6d2b79f5) | 0;
+      let value = Math.imul(state ^ (state >>> 15), 1 | state);
+      value ^= value + Math.imul(value ^ (value >>> 7), 61 | value);
+      return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function sampleIndicesWithoutReplacement(totalCount, sampleCount, random) {
+    const boundedCount = Math.max(0, Math.min(totalCount, sampleCount));
+    const pool = new Uint32Array(totalCount);
+    for (let index = 0; index < totalCount; index += 1) {
+      pool[index] = index;
+    }
+
+    const sampled = new Array(boundedCount);
+    for (let index = 0; index < boundedCount; index += 1) {
+      const pickIndex = index + Math.floor(random() * Math.max(1, totalCount - index));
+      const tmp = pool[index];
+      pool[index] = pool[pickIndex];
+      pool[pickIndex] = tmp;
+      sampled[index] = pool[index];
+    }
+    sampled.sort(function (a, b) {
+      return a - b;
+    });
+    return sampled;
+  }
+
+  function squaredDistanceForFeatureSet(a, b, featureIndices) {
+    let sum = 0;
+    if (!featureIndices) {
+      const length = Math.min(a.length, b.length);
+      for (let index = 0; index < length; index += 1) {
+        const delta = a[index] - b[index];
+        sum += delta * delta;
+      }
+      return sum;
+    }
+
+    for (let index = 0; index < featureIndices.length; index += 1) {
+      const feature = featureIndices[index];
+      const delta = (a[feature] || 0) - (b[feature] || 0);
+      sum += delta * delta;
+    }
+    return sum;
+  }
+
+  function copyRowToFloat64(row) {
+    const out = new Float64Array(row.length);
+    for (let index = 0; index < row.length; index += 1) {
+      out[index] = row[index];
+    }
+    return out;
+  }
+
+  function assignRowsToCentroids(rows, centroids, featureIndices) {
+    const rowCount = rows.length;
+    const labels = new Int32Array(rowCount);
+    let inertia = 0;
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      const row = rows[rowIndex];
+      let bestCluster = 0;
+      let bestDistance = Number.POSITIVE_INFINITY;
+      for (let clusterIndex = 0; clusterIndex < centroids.length; clusterIndex += 1) {
+        const distance = squaredDistanceForFeatureSet(row, centroids[clusterIndex], featureIndices);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestCluster = clusterIndex;
+        }
+      }
+      labels[rowIndex] = bestCluster;
+      inertia += bestDistance;
+    }
+    return { labels, inertia };
+  }
+
+  function initializeCentroidsKmeansPlusPlus(rows, k, random, featureIndices) {
+    const centroids = [];
+    centroids.push(copyRowToFloat64(rows[Math.floor(random() * rows.length)]));
+    while (centroids.length < k) {
+      const distances = new Float64Array(rows.length);
+      let total = 0;
+      for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+        let nearest = Number.POSITIVE_INFINITY;
+        for (let centroidIndex = 0; centroidIndex < centroids.length; centroidIndex += 1) {
+          const distance = squaredDistanceForFeatureSet(
+            rows[rowIndex],
+            centroids[centroidIndex],
+            featureIndices
+          );
+          if (distance < nearest) {
+            nearest = distance;
+          }
+        }
+        const bounded = Math.max(0, nearest);
+        distances[rowIndex] = bounded;
+        total += bounded;
+      }
+
+      if (total <= 1e-12) {
+        centroids.push(copyRowToFloat64(rows[Math.floor(random() * rows.length)]));
+        continue;
+      }
+
+      const threshold = random() * total;
+      let cursor = 0;
+      let pickedIndex = rows.length - 1;
+      for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+        cursor += distances[rowIndex];
+        if (cursor >= threshold) {
+          pickedIndex = rowIndex;
+          break;
+        }
+      }
+      centroids.push(copyRowToFloat64(rows[pickedIndex]));
+    }
+    return centroids;
+  }
+
+  function runKmeansLocal(rows, k, seed, maxIter, featureIndices) {
+    if (k < 2) {
+      throw new Error("k must be >= 2.");
+    }
+    if (k > rows.length) {
+      throw new Error("k cannot exceed row count.");
+    }
+
+    const random = createSeededRandom(seed);
+    const colCount = rows[0] ? rows[0].length : 0;
+    let centroids = initializeCentroidsKmeansPlusPlus(rows, k, random, featureIndices);
+    let labels = new Int32Array(rows.length);
+
+    for (let iter = 0; iter < maxIter; iter += 1) {
+      labels = assignRowsToCentroids(rows, centroids, featureIndices).labels;
+
+      const nextCentroids = new Array(k);
+      const counts = new Uint32Array(k);
+      for (let cluster = 0; cluster < k; cluster += 1) {
+        nextCentroids[cluster] = new Float64Array(colCount);
+      }
+
+      for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+        const label = labels[rowIndex];
+        const row = rows[rowIndex];
+        counts[label] += 1;
+        for (let col = 0; col < colCount; col += 1) {
+          nextCentroids[label][col] += row[col];
+        }
+      }
+
+      for (let cluster = 0; cluster < k; cluster += 1) {
+        if (counts[cluster] === 0) {
+          nextCentroids[cluster] = copyRowToFloat64(rows[Math.floor(random() * rows.length)]);
+          continue;
+        }
+        const scale = 1 / counts[cluster];
+        for (let col = 0; col < colCount; col += 1) {
+          nextCentroids[cluster][col] *= scale;
+        }
+      }
+
+      let maxShift = 0;
+      for (let cluster = 0; cluster < k; cluster += 1) {
+        const shift = Math.sqrt(squaredDistanceForFeatureSet(centroids[cluster], nextCentroids[cluster], null));
+        if (shift > maxShift) {
+          maxShift = shift;
+        }
+      }
+      centroids = nextCentroids;
+      if (maxShift <= 1e-6) {
+        break;
+      }
+    }
+
+    const finalAssignment = assignRowsToCentroids(rows, centroids, featureIndices);
+    return {
+      labels: finalAssignment.labels,
+      centroids,
+      inertia: finalAssignment.inertia
+    };
+  }
+
+  function zscoreRowsByColumn(rows) {
+    const rowCount = rows.length;
+    const colCount = rows[0] ? rows[0].length : 0;
+    const means = new Float64Array(colCount);
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      const row = rows[rowIndex];
+      for (let col = 0; col < colCount; col += 1) {
+        means[col] += row[col];
+      }
+    }
+    for (let col = 0; col < colCount; col += 1) {
+      means[col] /= Math.max(1, rowCount);
+    }
+
+    const variances = new Float64Array(colCount);
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      const row = rows[rowIndex];
+      for (let col = 0; col < colCount; col += 1) {
+        const delta = row[col] - means[col];
+        variances[col] += delta * delta;
+      }
+    }
+    const stds = new Float64Array(colCount);
+    for (let col = 0; col < colCount; col += 1) {
+      const variance = variances[col] / Math.max(1, rowCount);
+      stds[col] = variance > 1e-12 ? Math.sqrt(variance) : 1;
+    }
+
+    const normalizedRows = new Array(rowCount);
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      const row = rows[rowIndex];
+      const normalized = new Float32Array(colCount);
+      for (let col = 0; col < colCount; col += 1) {
+        normalized[col] = (row[col] - means[col]) / stds[col];
+      }
+      normalizedRows[rowIndex] = normalized;
+    }
+
+    return normalizedRows;
+  }
+
+  function computeSilhouetteLocal(rows, labels, k, seed) {
+    if (rows.length < 3 || k < 2) {
+      return 0;
+    }
+
+    const maxPoints = 300;
+    let sampledIndices;
+    if (rows.length <= maxPoints) {
+      sampledIndices = new Array(rows.length);
+      for (let index = 0; index < rows.length; index += 1) {
+        sampledIndices[index] = index;
+      }
+    } else {
+      const random = createSeededRandom(seed);
+      sampledIndices = sampleIndicesWithoutReplacement(rows.length, maxPoints, random);
+    }
+
+    const byCluster = new Map();
+    for (let index = 0; index < sampledIndices.length; index += 1) {
+      const rowIndex = sampledIndices[index];
+      const cluster = labels[rowIndex];
+      if (!byCluster.has(cluster)) {
+        byCluster.set(cluster, []);
+      }
+      byCluster.get(cluster).push(rowIndex);
+    }
+    if (byCluster.size < 2) {
+      return 0;
+    }
+
+    function meanDistance(source, targets) {
+      if (!targets || targets.length === 0) {
+        return 0;
+      }
+      let sum = 0;
+      for (let idx = 0; idx < targets.length; idx += 1) {
+        sum += Math.sqrt(squaredDistanceForFeatureSet(rows[source], rows[targets[idx]], null));
+      }
+      return sum / targets.length;
+    }
+
+    const scores = [];
+    for (let idx = 0; idx < sampledIndices.length; idx += 1) {
+      const sourceIndex = sampledIndices[idx];
+      const ownCluster = labels[sourceIndex];
+      const ownMembers = byCluster.get(ownCluster).filter(function (candidate) {
+        return candidate !== sourceIndex;
+      });
+      if (ownMembers.length === 0) {
+        scores.push(0);
+        continue;
+      }
+
+      const a = meanDistance(sourceIndex, ownMembers);
+      let b = Number.POSITIVE_INFINITY;
+      byCluster.forEach(function (members, clusterId) {
+        if (clusterId === ownCluster || members.length === 0) {
+          return;
+        }
+        b = Math.min(b, meanDistance(sourceIndex, members));
+      });
+      if (!Number.isFinite(b)) {
+        scores.push(0);
+        continue;
+      }
+      const denom = Math.max(a, b, 1e-12);
+      scores.push((b - a) / denom);
+    }
+
+    if (scores.length === 0) {
+      return 0;
+    }
+    let sum = 0;
+    for (let index = 0; index < scores.length; index += 1) {
+      sum += scores[index];
+    }
+    return sum / scores.length;
+  }
+
+  function computeClusterSizesLocal(labels, k) {
+    const counts = new Array(k).fill(0);
+    for (let index = 0; index < labels.length; index += 1) {
+      counts[labels[index]] += 1;
+    }
+    return counts;
+  }
+
+  function computeCentroidDistanceSummaryLocal(centroids) {
+    if (centroids.length < 2) {
+      return { min: 0, mean: 0 };
+    }
+    const distances = [];
+    for (let left = 0; left < centroids.length; left += 1) {
+      for (let right = left + 1; right < centroids.length; right += 1) {
+        distances.push(
+          Math.sqrt(squaredDistanceForFeatureSet(centroids[left], centroids[right], null))
+        );
+      }
+    }
+    if (distances.length === 0) {
+      return { min: 0, mean: 0 };
+    }
+    let sum = 0;
+    let min = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < distances.length; index += 1) {
+      const value = distances[index];
+      sum += value;
+      if (value < min) {
+        min = value;
+      }
+    }
+    return { min, mean: sum / distances.length };
+  }
+
+  function computeBestLabelAgreementLocal(referenceLabels, candidateLabels, k) {
+    const counts = new Array(k);
+    for (let ref = 0; ref < k; ref += 1) {
+      counts[ref] = new Array(k).fill(0);
+    }
+    for (let index = 0; index < referenceLabels.length; index += 1) {
+      counts[referenceLabels[index]][candidateLabels[index]] += 1;
+    }
+
+    const ranked = [];
+    for (let ref = 0; ref < k; ref += 1) {
+      for (let cand = 0; cand < k; cand += 1) {
+        ranked.push([counts[ref][cand], ref, cand]);
+      }
+    }
+    ranked.sort(function (left, right) {
+      return right[0] - left[0];
+    });
+
+    const candidateToRef = new Map();
+    const usedRefs = new Set();
+    for (let index = 0; index < ranked.length; index += 1) {
+      const value = ranked[index][0];
+      const ref = ranked[index][1];
+      const cand = ranked[index][2];
+      if (value <= 0) {
+        break;
+      }
+      if (candidateToRef.has(cand) || usedRefs.has(ref)) {
+        continue;
+      }
+      candidateToRef.set(cand, ref);
+      usedRefs.add(ref);
+    }
+
+    const remainingRefs = [];
+    for (let ref = 0; ref < k; ref += 1) {
+      if (!usedRefs.has(ref)) {
+        remainingRefs.push(ref);
+      }
+    }
+    for (let cand = 0; cand < k; cand += 1) {
+      if (!candidateToRef.has(cand)) {
+        candidateToRef.set(cand, remainingRefs.length > 0 ? remainingRefs.shift() : cand);
+      }
+    }
+
+    let matches = 0;
+    for (let index = 0; index < referenceLabels.length; index += 1) {
+      const mapped = candidateToRef.get(candidateLabels[index]);
+      if (mapped === referenceLabels[index]) {
+        matches += 1;
+      }
+    }
+    return matches / Math.max(1, referenceLabels.length);
+  }
+
+  async function computeStabilityLocal(
+    rows,
+    baselineLabels,
+    k,
+    seed,
+    maxIter,
+    runs,
+    rowRatio,
+    featureRatio,
+    onProgress
+  ) {
+    if (runs <= 0) {
+      return { mean: 0, std: 0, min: 0, max: 0 };
+    }
+
+    const rowCount = rows.length;
+    const colCount = rows[0] ? rows[0].length : 0;
+    if (rowCount < k || colCount <= 0) {
+      return { mean: 0, std: 0, min: 0, max: 0 };
+    }
+
+    const random = createSeededRandom(seed);
+    const rowSampleSize = Math.max(k, Math.min(rowCount, Math.round(rowCount * rowRatio)));
+    const featureSampleSize = Math.max(1, Math.min(colCount, Math.round(colCount * featureRatio)));
+    const scores = [];
+
+    for (let runIndex = 0; runIndex < runs; runIndex += 1) {
+      const sampledRowIndices = sampleIndicesWithoutReplacement(rowCount, rowSampleSize, random);
+      const sampledFeatureIndices = sampleIndicesWithoutReplacement(colCount, featureSampleSize, random);
+      const sampledRows = new Array(sampledRowIndices.length);
+      for (let index = 0; index < sampledRowIndices.length; index += 1) {
+        sampledRows[index] = rows[sampledRowIndices[index]];
+      }
+
+      const runModel = runKmeansLocal(
+        sampledRows,
+        k,
+        seed + 7919 * (runIndex + 1),
+        maxIter,
+        sampledFeatureIndices
+      );
+      const fullAssignment = assignRowsToCentroids(rows, runModel.centroids, sampledFeatureIndices);
+      const score = computeBestLabelAgreementLocal(baselineLabels, fullAssignment.labels, k);
+      scores.push(score);
+
+      if (typeof onProgress === "function") {
+        onProgress(runIndex + 1, runs);
+      }
+      await waitForUiFrame();
+    }
+
+    if (scores.length === 0) {
+      return { mean: 0, std: 0, min: 0, max: 0 };
+    }
+
+    let sum = 0;
+    let min = Number.POSITIVE_INFINITY;
+    let max = Number.NEGATIVE_INFINITY;
+    for (let index = 0; index < scores.length; index += 1) {
+      const value = scores[index];
+      sum += value;
+      if (value < min) {
+        min = value;
+      }
+      if (value > max) {
+        max = value;
+      }
+    }
+    const mean = sum / scores.length;
+    let variance = 0;
+    for (let index = 0; index < scores.length; index += 1) {
+      const delta = scores[index] - mean;
+      variance += delta * delta;
+    }
+    const std = scores.length > 1 ? Math.sqrt(variance / scores.length) : 0;
+    return { mean, std, min, max };
+  }
+
+  function computeClusterPurityLocal(labels, classLabels, k) {
+    if (labels.length !== classLabels.length) {
+      throw new Error("Class labels length mismatch.");
+    }
+
+    const perCluster = [];
+    let weightedPurityNumerator = 0;
+    for (let clusterId = 0; clusterId < k; clusterId += 1) {
+      const memberIndices = [];
+      for (let index = 0; index < labels.length; index += 1) {
+        if (labels[index] === clusterId) {
+          memberIndices.push(index);
+        }
+      }
+
+      if (memberIndices.length === 0) {
+        perCluster.push({
+          cluster: clusterId,
+          size: 0,
+          top_label: null,
+          purity: 0,
+          class_counts: {}
+        });
+        continue;
+      }
+
+      const counts = Object.create(null);
+      for (let index = 0; index < memberIndices.length; index += 1) {
+        const key = classLabels[memberIndices[index]];
+        counts[key] = (counts[key] || 0) + 1;
+      }
+
+      let topLabel = "";
+      let topCount = 0;
+      Object.keys(counts).forEach(function (key) {
+        if (counts[key] > topCount) {
+          topCount = counts[key];
+          topLabel = key;
+        }
+      });
+      const purity = topCount / Math.max(1, memberIndices.length);
+      weightedPurityNumerator += topCount;
+      perCluster.push({
+        cluster: clusterId,
+        size: memberIndices.length,
+        top_label: topLabel,
+        purity,
+        class_counts: counts
+      });
+    }
+
+    return {
+      overall_purity: weightedPurityNumerator / Math.max(1, labels.length),
+      per_cluster: perCluster
+    };
+  }
+
+  async function runRClusterInBrowserLocal(dataset, params) {
+    if (!dataset || !Array.isArray(dataset.rows) || dataset.rows.length < 2) {
+      throw new Error("Not enough rows to run clustering.");
+    }
+
+    setRClusterProgress(24);
+    await waitForUiFrame();
+    const normalizedRows = zscoreRowsByColumn(dataset.rows);
+
+    setRClusterProgress(46);
+    await waitForUiFrame();
+    const baseline = runKmeansLocal(
+      normalizedRows,
+      params.k,
+      params.seed,
+      params.maxIter,
+      null
+    );
+
+    setRClusterProgress(64);
+    await waitForUiFrame();
+    const silhouette = computeSilhouetteLocal(
+      normalizedRows,
+      baseline.labels,
+      params.k,
+      params.seed + 17
+    );
+
+    setRClusterProgress(72);
+    const stability = await computeStabilityLocal(
+      normalizedRows,
+      baseline.labels,
+      params.k,
+      params.seed + 101,
+      params.maxIter,
+      params.stabilityRuns,
+      params.rowRatio,
+      params.featureRatio,
+      function (done, total) {
+        const ratio = total > 0 ? done / total : 1;
+        setRClusterProgress(72 + ratio * 22);
+      }
+    );
+
+    const centroidDistance = computeCentroidDistanceSummaryLocal(baseline.centroids);
+    const sizes = computeClusterSizesLocal(baseline.labels, params.k);
+    const clusters = [];
+    for (let clusterId = 0; clusterId < sizes.length; clusterId += 1) {
+      const centroid = baseline.centroids[clusterId];
+      let normSquared = 0;
+      for (let index = 0; index < centroid.length; index += 1) {
+        normSquared += centroid[index] * centroid[index];
+      }
+      clusters.push({
+        cluster: clusterId,
+        size: sizes[clusterId],
+        ratio: sizes[clusterId] / Math.max(1, normalizedRows.length),
+        centroid_norm: Math.sqrt(Math.max(0, normSquared))
+      });
+    }
+
+    const purity = computeClusterPurityLocal(baseline.labels, dataset.classLabels, params.k);
+    return {
+      command: "r-cluster",
+      schema_version: "0.2.0-js",
+      status: "ok",
+      input: {
+        source: "webview-js",
+        sample_count: normalizedRows.length,
+        feature_count: dataset.featureColumns.length,
+        feature_columns: dataset.featureColumns
+      },
+      params: {
+        k: params.k,
+        seed: params.seed,
+        max_iter: params.maxIter,
+        stability_runs: params.stabilityRuns,
+        row_ratio: params.rowRatio,
+        feature_ratio: params.featureRatio,
+        representation: "zscore(feature columns) + euclidean distance",
+        backend: "javascript"
+      },
+      diagnostics: {
+        inertia: baseline.inertia,
+        silhouette,
+        stability,
+        centroid_distance: centroidDistance
+      },
+      clusters,
+      classwise: {
+        labels_source: "activation_overlay",
+        purity
+      }
+    };
+  }
+
+  function renderRClusterResults() {
+    if (!rclusterResults) {
+      return;
+    }
+
+    rclusterResults.innerHTML = "";
+    if (!rClusterResult || typeof rClusterResult !== "object") {
+      rclusterResults.appendChild(
+        createMetricsGroup("r-Clustering", [["Status", "Run clustering to view diagnostics."]])
+      );
+      return;
+    }
+
+    const result = asRecord(rClusterResult);
+    if (!result) {
+      rclusterResults.appendChild(
+        createMetricsGroup("r-Clustering", [["Status", "Invalid result payload."]])
+      );
+      return;
+    }
+
+    const input = asRecord(result.input);
+    const params = asRecord(result.params);
+    const diagnostics = asRecord(result.diagnostics);
+    const stability = diagnostics ? asRecord(diagnostics.stability) : null;
+    const centroidDistance = diagnostics ? asRecord(diagnostics.centroid_distance) : null;
+
+    rclusterResults.appendChild(
+      createMetricsGroup("r-Clustering Input", [
+        [
+          "Feature source",
+          rClusterLastRunContext && rClusterLastRunContext.sourceDescription
+            ? rClusterLastRunContext.sourceDescription
+            : rClusterRepresentationMode === "stft"
+              ? "short-time STFT spectrogram features"
+              : "short-time mel features"
+        ],
+        [
+          "Frames / features (used)",
+          String(
+            rClusterLastRunContext && Number.isFinite(rClusterLastRunContext.frameCountUsed)
+              ? rClusterLastRunContext.frameCountUsed
+              : sanitizeInt(input && input.sample_count, 0, 0, 1000000000)
+          ) +
+            " / " +
+            String(
+              rClusterLastRunContext && Number.isFinite(rClusterLastRunContext.featureCountUsed)
+                ? rClusterLastRunContext.featureCountUsed
+                : sanitizeInt(input && input.feature_count, 0, 0, 1000000000)
+            )
+        ],
+        [
+          "Frames / features (original)",
+          String(
+            rClusterLastRunContext && Number.isFinite(rClusterLastRunContext.frameCountOriginal)
+              ? rClusterLastRunContext.frameCountOriginal
+              : sanitizeInt(input && input.sample_count, 0, 0, 1000000000)
+          ) +
+            " / " +
+            String(
+              rClusterLastRunContext && Number.isFinite(rClusterLastRunContext.featureCountOriginal)
+                ? rClusterLastRunContext.featureCountOriginal
+                : sanitizeInt(input && input.feature_count, 0, 0, 1000000000)
+            )
+        ],
+        [
+          "Derived classes (active/inactive)",
+          String(
+            rClusterLastRunContext && Number.isFinite(rClusterLastRunContext.activeFrames)
+              ? rClusterLastRunContext.activeFrames
+              : 0
+          ) +
+            " / " +
+            String(
+              rClusterLastRunContext && Number.isFinite(rClusterLastRunContext.inactiveFrames)
+                ? rClusterLastRunContext.inactiveFrames
+                : 0
+            )
+        ],
+        [
+          "Analysis channel",
+          rClusterLastRunContext && rClusterLastRunContext.analysisSource
+            ? rClusterLastRunContext.analysisSource
+            : getSingleChannelAnalysisLabel()
+        ],
+        [
+          "k / seed / max_iter",
+          String(sanitizeInt(params && params.k, 0, 0, 1024)) +
+            " / " +
+            String(sanitizeInt(params && params.seed, 0, -2147483648, 2147483647)) +
+            " / " +
+            String(sanitizeInt(params && params.max_iter, 0, 0, 1000000))
+        ]
+      ])
+    );
+
+    rclusterResults.appendChild(
+      createMetricsGroup("r-Clustering Diagnostics", [
+        ["Inertia", formatMetricNumber(Number(diagnostics && diagnostics.inertia), 5)],
+        ["Silhouette", formatMetricNumber(Number(diagnostics && diagnostics.silhouette), 5)],
+        [
+          "Stability (mean/std/min/max)",
+          formatMetricNumber(Number(stability && stability.mean), 4) +
+            " / " +
+            formatMetricNumber(Number(stability && stability.std), 4) +
+            " / " +
+            formatMetricNumber(Number(stability && stability.min), 4) +
+            " / " +
+            formatMetricNumber(Number(stability && stability.max), 4)
+        ],
+        [
+          "Centroid distance (min/mean)",
+          formatMetricNumber(Number(centroidDistance && centroidDistance.min), 4) +
+            " / " +
+            formatMetricNumber(Number(centroidDistance && centroidDistance.mean), 4)
+        ]
+      ])
+    );
+
+    const clusters = Array.isArray(result.clusters) ? result.clusters : [];
+    if (clusters.length > 0) {
+      for (let index = 0; index < clusters.length; index += 1) {
+        const cluster = asRecord(clusters[index]);
+        if (!cluster) {
+          continue;
+        }
+        rclusterResults.appendChild(
+          createMetricsGroup("Cluster " + sanitizeInt(cluster.cluster, index, 0, 1000000), [
+            ["Size", String(sanitizeInt(cluster.size, 0, 0, 1000000000))],
+            ["Ratio", formatMetricPercent(Number(cluster.ratio))],
+            ["Centroid norm", formatMetricNumber(Number(cluster.centroid_norm), 4)]
+          ])
+        );
+      }
+    }
+
+    const classwise = asRecord(result.classwise);
+    const purity = classwise ? asRecord(classwise.purity) : null;
+    if (purity) {
+      rclusterResults.appendChild(
+        createMetricsGroup("Classwise Purity", [
+          [
+            "Overall purity",
+            formatMetricPercent(Number(purity.overall_purity))
+          ]
+        ])
+      );
+    }
+  }
+
+  function updateRClusterControls() {
+    const hasAudio = Boolean(primaryAudio && primaryAudio.samples && primaryAudio.samples.length > 0);
+    const hasOverlay = Boolean(state.overlay.enabled && overlayParsed && overlayParsed.intervals.length > 0);
+
+    rclusterFeaturePath.textContent =
+      "Feature source: " +
+      (rClusterRepresentationMode === "stft"
+        ? "short-time STFT log-magnitude spectrogram frames"
+        : "short-time mel frames") +
+      ". Backend: in-browser JavaScript.";
+    rclusterLabelsPath.textContent = hasOverlay
+      ? "Activation overlay loaded: " +
+        overlayParsed.intervals.length +
+        " intervals, mode=" +
+        overlayParsed.mode +
+        "."
+      : "Activation overlay required to derive active/inactive labels.";
+
+    rclusterRun.disabled = rClusterRunning || !hasAudio || !hasOverlay;
+    rclusterRepresentation.disabled = rClusterRunning;
   }
 
   function getHistogramCanvasContext(canvas) {
@@ -9073,6 +10161,7 @@
       empty.textContent = "No transform views selected. Add one with \"Add View\".";
       renderStackContainer.appendChild(empty);
       renderMetricsReport();
+      updateRClusterControls();
       return;
     }
 
@@ -9312,6 +10401,7 @@
 
     updateAnimatedPlayheads();
     renderMetricsReport();
+    updateRClusterControls();
   }
 
   function updateAnimatedPlayheads() {
@@ -9444,6 +10534,50 @@
       }
 
       applyWorkspacePreset(presetId);
+      return;
+    }
+
+    if (message.type === "rClusterRunStarted") {
+      rClusterRunning = true;
+      updateRClusterControls();
+      startRClusterProgress(Math.max(30, Number(rclusterProgress.value) || 0));
+      setRClusterStatus("Running r-clustering...");
+      return;
+    }
+
+    if (message.type === "rClusterResult") {
+      const payload = asRecord(message.payload);
+      rClusterRunning = false;
+      const resultPayload = payload ? asRecord(payload.result) : null;
+      const runContext = payload ? asRecord(payload.runContext) : null;
+      rClusterResult = resultPayload || null;
+      rClusterLastRunContext = runContext || rClusterLastRunContext;
+      updateRClusterControls();
+      completeRClusterProgress();
+
+      const diagnostics = resultPayload ? asRecord(resultPayload.diagnostics) : null;
+      const silhouette = diagnostics ? Number(diagnostics.silhouette) : Number.NaN;
+      const stability = diagnostics ? asRecord(diagnostics.stability) : null;
+      const stabilityMean = stability ? Number(stability.mean) : Number.NaN;
+      setRClusterStatus(
+        "r-clustering complete. silhouette=" +
+          formatMetricNumber(silhouette, 4) +
+          ", stability=" +
+          formatMetricNumber(stabilityMean, 4) +
+          "."
+      );
+      renderRClusterResults();
+      return;
+    }
+
+    if (message.type === "rClusterError") {
+      const payload = asRecord(message.payload);
+      rClusterRunning = false;
+      updateRClusterControls();
+      failRClusterProgress();
+      const errorMessage = sanitizeStringValue(payload && payload.message, 2048);
+      setRClusterStatus("r-clustering failed: " + (errorMessage || "Unknown toolbox error."));
+      return;
     }
   });
 
@@ -9715,9 +10849,91 @@
     postState();
   });
 
+  function syncRClusterParamsAndControls() {
+    syncRClusterParamInputs();
+    updateRClusterControls();
+  }
+
+  rclusterRepresentation.addEventListener("change", function () {
+    syncRClusterParamsAndControls();
+  });
+
+  [
+    rclusterK,
+    rclusterSeed,
+    rclusterMaxIter,
+    rclusterStabilityRuns,
+    rclusterRowRatio,
+    rclusterFeatureRatio
+  ].forEach(function (input) {
+    input.addEventListener("change", syncRClusterParamsAndControls);
+  });
+
+  rclusterRun.addEventListener("click", function () {
+    if (rClusterRunning) {
+      return;
+    }
+
+    const params = getRClusterParamsFromInputs();
+    syncRClusterParamInputs();
+    let dataset;
+    try {
+      dataset = buildRClusterDataset();
+    } catch (error) {
+      failRClusterProgress();
+      setRClusterStatus("r-clustering prerequisites failed: " + toErrorText(error));
+      return;
+    }
+
+    rClusterLastRunContext = dataset.runContext;
+    rClusterRunning = true;
+    updateRClusterControls();
+    setRClusterStatus("Running in-browser r-clustering (JavaScript backend)...");
+    startRClusterProgress(12);
+
+    void runRClusterInBrowserLocal(dataset, params)
+      .then(function (result) {
+        rClusterRunning = false;
+        rClusterResult = result;
+        updateRClusterControls();
+        completeRClusterProgress();
+
+        const diagnostics = asRecord(result.diagnostics);
+        const silhouette = diagnostics ? Number(diagnostics.silhouette) : Number.NaN;
+        const stability = diagnostics ? asRecord(diagnostics.stability) : null;
+        const stabilityMean = stability ? Number(stability.mean) : Number.NaN;
+        setRClusterStatus(
+          "r-clustering complete (JS). silhouette=" +
+            formatMetricNumber(silhouette, 4) +
+            ", stability=" +
+            formatMetricNumber(stabilityMean, 4) +
+            "."
+        );
+        renderRClusterResults();
+      })
+      .catch(function (error) {
+        rClusterRunning = false;
+        updateRClusterControls();
+        failRClusterProgress();
+        setRClusterStatus("r-clustering failed: " + toErrorText(error));
+      });
+  });
+
+  if (rclusterStatus.textContent.trim().length === 0) {
+    setRClusterStatus("Ready to run r-clustering from generated short-time features.");
+  } else {
+    setRClusterStatus(
+      "Ready to run r-clustering from generated short-time features (JavaScript backend)."
+    );
+  }
+
   window.addEventListener("resize", scheduleRenderTransformStack);
 
   syncControlsFromState();
+  syncRClusterParamInputs();
+  updateRClusterControls();
+  setRClusterProgress(0);
+  renderRClusterResults();
   if (state.comparison.secondAudioName) {
     setComparisonStatus(
       "Second clip remembered as " +

@@ -1,9 +1,62 @@
 import * as vscode from "vscode";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { buildWorkbenchHtml, getWorkbenchLocalResourceRoots } from "./workbenchHtml";
+import { runToolboxJson, ToolboxInvocationError } from "../toolbox/toolboxCli";
 
 export interface WorkbenchStatePersistence {
   load(): unknown | undefined;
   save(state: unknown): Thenable<void> | void;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
+}
+
+const MAX_RCLUSTER_CSV_BYTES = 8 * 1024 * 1024;
+const MAX_RUN_CONTEXT_CHARS = 64_000;
+
+function sanitizeNullableText(value: unknown, maxChars: number): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  if (!value.trim()) {
+    return null;
+  }
+  if (value.length > maxChars) {
+    return value.slice(0, maxChars);
+  }
+  return value;
+}
+
+function sanitizeInteger(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number
+): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.round(numeric)));
+}
+
+function sanitizeNumber(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number
+): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, numeric));
 }
 
 export class AudioWorkbenchPanel {
@@ -95,19 +148,153 @@ export class AudioWorkbenchPanel {
   }
 
   private handleWebviewMessage(message: unknown): void {
-    if (!message || typeof message !== "object") {
+    const record = asRecord(message);
+    if (!record) {
       return;
     }
 
-    if ("type" in message && message.type === "ready") {
+    const messageType = typeof record.type === "string" ? record.type : "";
+    if (messageType === "ready") {
       this.webviewReady = true;
       this.trySendPreloadMessage();
       this.trySendPresetMessage();
       return;
     }
 
-    if ("type" in message && message.type === "stateChanged" && "payload" in message) {
-      void this.statePersistence?.save(message.payload);
+    if (messageType === "stateChanged" && "payload" in record) {
+      void this.statePersistence?.save(record.payload);
+      return;
+    }
+
+    if (messageType === "runRCluster") {
+      void this.runRCluster(record.payload);
+    }
+  }
+
+  private async runRCluster(rawPayload: unknown): Promise<void> {
+    const payload = asRecord(rawPayload);
+    if (!payload) {
+      void this.panel.webview.postMessage({
+        type: "rClusterError",
+        payload: { message: "Invalid run payload." }
+      });
+      return;
+    }
+
+    const featureCsvText = sanitizeNullableText(payload.featureCsvText, MAX_RCLUSTER_CSV_BYTES * 2);
+    const labelsCsvText = sanitizeNullableText(payload.labelsCsvText, MAX_RCLUSTER_CSV_BYTES * 2);
+    if (!featureCsvText) {
+      void this.panel.webview.postMessage({
+        type: "rClusterError",
+        payload: { message: "Generated feature CSV content is required." }
+      });
+      return;
+    }
+    if (!labelsCsvText) {
+      void this.panel.webview.postMessage({
+        type: "rClusterError",
+        payload: { message: "Generated labels CSV content is required." }
+      });
+      return;
+    }
+    if (featureCsvText.includes("\0") || labelsCsvText.includes("\0")) {
+      void this.panel.webview.postMessage({
+        type: "rClusterError",
+        payload: { message: "CSV payload contains invalid NUL byte." }
+      });
+      return;
+    }
+
+    const featureCsvBytes = Buffer.byteLength(featureCsvText, "utf8");
+    const labelsCsvBytes = Buffer.byteLength(labelsCsvText, "utf8");
+    if (featureCsvBytes > MAX_RCLUSTER_CSV_BYTES || labelsCsvBytes > MAX_RCLUSTER_CSV_BYTES) {
+      void this.panel.webview.postMessage({
+        type: "rClusterError",
+        payload: {
+          message:
+            "Generated CSV payload is too large (feature=" +
+            featureCsvBytes +
+            " bytes, labels=" +
+            labelsCsvBytes +
+            " bytes)."
+        }
+      });
+      return;
+    }
+
+    const k = sanitizeInteger(payload.k, 2, 2, 64);
+    const seed = sanitizeInteger(payload.seed, 0, -2147483648, 2147483647);
+    const maxIter = sanitizeInteger(payload.maxIter, 64, 4, 2048);
+    const stabilityRuns = sanitizeInteger(payload.stabilityRuns, 16, 1, 128);
+    const rowRatio = sanitizeNumber(payload.rowRatio, 0.8, 0.1, 1);
+    const featureRatio = sanitizeNumber(payload.featureRatio, 0.8, 0.1, 1);
+    const runContext = asRecord(payload.runContext);
+    const runContextSerialized = runContext ? JSON.stringify(runContext) : undefined;
+    const safeRunContext =
+      runContextSerialized && runContextSerialized.length <= MAX_RUN_CONTEXT_CHARS
+        ? runContext
+        : undefined;
+
+    let tempDir: string | undefined;
+    try {
+      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "audio-eda-rcluster-"));
+      const featureCsvPath = path.join(tempDir, "features.csv");
+      const labelsCsvPath = path.join(tempDir, "labels.csv");
+      await fs.writeFile(featureCsvPath, featureCsvText, { encoding: "utf8", mode: 0o600 });
+      await fs.writeFile(labelsCsvPath, labelsCsvText, { encoding: "utf8", mode: 0o600 });
+
+      const args = [
+        "r-cluster",
+        featureCsvPath,
+        "--k",
+        String(k),
+        "--seed",
+        String(seed),
+        "--max-iter",
+        String(maxIter),
+        "--stability-runs",
+        String(stabilityRuns),
+        "--row-ratio",
+        String(rowRatio),
+        "--feature-ratio",
+        String(featureRatio),
+        "--labels-csv",
+        labelsCsvPath,
+        "--json"
+      ];
+
+      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      const cwd = workspaceRoot || tempDir;
+
+      void this.panel.webview.postMessage({ type: "rClusterRunStarted" });
+      const result = await runToolboxJson(args, cwd);
+      void this.panel.webview.postMessage({
+        type: "rClusterResult",
+        payload: {
+          result,
+          runContext: safeRunContext
+        }
+      });
+    } catch (error: unknown) {
+      let message = error instanceof Error ? error.message : String(error);
+      if (error instanceof ToolboxInvocationError) {
+        const stderr = error.result.stderr.trim();
+        if (stderr) {
+          message = stderr;
+        }
+      }
+      void this.panel.webview.postMessage({
+        type: "rClusterError",
+        payload: { message }
+      });
+    } finally {
+      if (tempDir) {
+        try {
+          await fs.rm(tempDir, { recursive: true, force: true });
+        } catch {
+          // best effort cleanup
+        }
+      }
     }
   }
 

@@ -225,6 +225,35 @@ export function buildWorkbenchHtml(
         />
         <p id="pca-guidance" class="hint"></p>
 
+        <h2>r-Clustering</h2>
+        <label class="row" for="rcluster-representation">Feature source</label>
+        <select id="rcluster-representation">
+          <option value="mel">Short-time mel features</option>
+          <option value="stft">Short-time STFT spectrogram features</option>
+        </select>
+        <p id="rcluster-feature-path" class="hint">
+          Features are generated from the current primary audio clip.
+        </p>
+        <p id="rcluster-labels-path" class="hint">
+          Labels are generated from activation overlay intervals (active/inactive classes).
+        </p>
+        <label class="row" for="rcluster-k">k (clusters)</label>
+        <input id="rcluster-k" type="number" min="2" max="64" step="1" value="2" />
+        <label class="row" for="rcluster-seed">Random seed</label>
+        <input id="rcluster-seed" type="number" min="-2147483648" max="2147483647" step="1" value="0" />
+        <label class="row" for="rcluster-max-iter">Max iterations</label>
+        <input id="rcluster-max-iter" type="number" min="4" max="512" step="1" value="32" />
+        <label class="row" for="rcluster-stability-runs">Stability runs</label>
+        <input id="rcluster-stability-runs" type="number" min="1" max="48" step="1" value="6" />
+        <label class="row" for="rcluster-row-ratio">Row sampling ratio</label>
+        <input id="rcluster-row-ratio" type="number" min="0.1" max="1" step="0.05" value="0.8" />
+        <label class="row" for="rcluster-feature-ratio">Feature sampling ratio</label>
+        <input id="rcluster-feature-ratio" type="number" min="0.1" max="1" step="0.05" value="0.8" />
+        <button id="rcluster-run" type="button">Run r-clustering</button>
+        <progress id="rcluster-progress" class="rcluster-progress" max="100" value="0"></progress>
+        <p id="rcluster-status" class="hint">Ready to run r-clustering from generated short-time features.</p>
+        <div id="rcluster-results" class="rcluster-results"></div>
+
         <h2>Multichannel</h2>
         <label id="multichannel-enabled-row" class="row"><input id="multichannel-enabled" type="checkbox" /> Enable multichannel mode</label>
         <label id="multichannel-split-row" class="row">
