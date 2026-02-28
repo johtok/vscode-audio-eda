@@ -1,14 +1,8 @@
-# pixi environments
-.pixi/*
-!.pixi/config.toml
+node_modules/
+out/
+out-test/
+*.vsix
+.vscode-test/
 
-# Common build artifacts from nested sub-repos
-**/.venv/
-**/__pycache__/
-**/.pytest_cache/
-**/dist/
-**/build/
-**/.mypy_cache/
-**/.ruff_cache/
-**/node_modules/
-**/.vscode-test/
+__pycache__/
+*.pyc
