@@ -310,6 +310,11 @@ function sanitizeWorkbenchStatePayload(rawState: unknown): unknown | undefined {
     }
   }
 
+  const ui = asRecord(record.ui);
+  if (ui) {
+    sanitized.ui.showAdvanced = sanitizeBoolean(ui.showAdvanced, sanitized.ui.showAdvanced);
+  }
+
   const overlay = asRecord(record.overlay);
   if (overlay) {
     sanitized.overlay.enabled = sanitizeBoolean(overlay.enabled, sanitized.overlay.enabled);
@@ -745,18 +750,18 @@ function handleToolboxError(channel: vscode.OutputChannel, error: unknown): void
     if (error.result.stderr.trim()) {
       channel.appendLine(error.result.stderr.trim());
     }
-    void vscode.window.showErrorMessage(`Audio EDA toolbox failed: ${error.message}`);
+    void vscode.window.showErrorMessage(`Audio EDA Preview toolbox failed: ${error.message}`);
     return;
   }
 
   const message = error instanceof Error ? error.message : String(error);
   channel.appendLine(`[toolbox] Unexpected error: ${message}`);
-  void vscode.window.showErrorMessage(`Audio EDA unexpected error: ${message}`);
+  void vscode.window.showErrorMessage(`Audio EDA Preview unexpected error: ${message}`);
 }
 
 export function activate(context: vscode.ExtensionContext): void {
   const extensionId = context.extension.id;
-  const output = vscode.window.createOutputChannel("Audio EDA");
+  const output = vscode.window.createOutputChannel("Audio EDA Preview");
   const sidebarProvider = new AudioEdaSidebarProvider();
   const reopenGuard = new Set<string>();
 
@@ -984,7 +989,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
       await config.update("openWorkbenchWhenAudioFileFocused", next, targetScope);
       void vscode.window.showInformationMessage(
-        `Audio EDA auto-open on audio focus: ${next ? "enabled" : "disabled"}`
+        `Audio EDA Preview auto-open on audio focus: ${next ? "enabled" : "disabled"}`
       );
     }
   );
@@ -1028,7 +1033,7 @@ export function activate(context: vscode.ExtensionContext): void {
       try {
         const payload = await runToolboxJson(["summarize", target, "--json"], target);
         logJson(output, "[summarize] result", payload);
-        void vscode.window.showInformationMessage("Audio EDA summary complete.");
+        void vscode.window.showInformationMessage("Audio EDA Preview summary complete.");
       } catch (error: unknown) {
         handleToolboxError(output, error);
       }
@@ -1182,7 +1187,7 @@ export function activate(context: vscode.ExtensionContext): void {
         const accuracy = Number(record?.training_accuracy);
         const instanceCount = Number(record?.instance_count);
         void vscode.window.showInformationMessage(
-          "Audio EDA CASTOR prototype complete. " +
+          "Audio EDA Preview CASTOR prototype complete. " +
             "instances=" +
             (Number.isFinite(instanceCount) ? String(Math.round(instanceCount)) : "n/a") +
             ", training_accuracy=" +

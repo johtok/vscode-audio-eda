@@ -1,4 +1,4 @@
-# Roadmap: vscode-audio-eda
+# Roadmap: vscode-audio-eda-preview
 
 This roadmap follows your requested priority order exactly.
 

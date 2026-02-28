@@ -1,7 +1,7 @@
 {
-  "name": "vscode-audio-eda",
-  "displayName": "Audio EDA",
-  "description": "VS Code extension for audio EDA and ML dataset diagnostics",
+  "name": "audio-eda-preview",
+  "displayName": "Audio EDA Preview",
+  "description": "VS Code extension for Audio EDA Preview and ML dataset diagnostics",
   "version": "1.0.0",
   "publisher": "johtok",
   "license": "MIT",
@@ -29,51 +29,51 @@
     "commands": [
       {
         "command": "audioEda.openWorkbench",
-        "title": "Audio EDA: Open Workbench"
+        "title": "Audio EDA Preview: Open Workbench"
       },
       {
         "command": "audioEda.openPresetWorkspace",
-        "title": "Audio EDA: Open General Workspace Preset"
+        "title": "Audio EDA Preview: Open General Workspace Preset"
       },
       {
         "command": "audioEda.openPresetTransforms",
-        "title": "Audio EDA: Open Transform Lab Preset"
+        "title": "Audio EDA Preview: Open Transform Lab Preset"
       },
       {
         "command": "audioEda.openPresetMetrics",
-        "title": "Audio EDA: Open Metrics Preset"
+        "title": "Audio EDA Preview: Open Metrics Preset"
       },
       {
         "command": "audioEda.openPresetPca",
-        "title": "Audio EDA: Open PCA Preset"
+        "title": "Audio EDA Preview: Open PCA Preset"
       },
       {
         "command": "audioEda.openWorkbenchForFile",
-        "title": "Audio EDA: Open Workspace For Audio File"
+        "title": "Audio EDA Preview: Open Workspace For Audio File"
       },
       {
         "command": "audioEda.reopenActiveWithAudioEda",
-        "title": "Audio EDA: Reopen Active Editor With Audio EDA"
+        "title": "Audio EDA Preview: Reopen Active Editor With Audio EDA Preview"
       },
       {
         "command": "audioEda.toggleAutoOpenOnFocus",
-        "title": "Audio EDA: Toggle Auto-Open On Audio Focus"
+        "title": "Audio EDA Preview: Toggle Auto-Open On Audio Focus"
       },
       {
         "command": "audioEda.openExtensionSettings",
-        "title": "Audio EDA: Open Extension Settings"
+        "title": "Audio EDA Preview: Open Extension Settings"
       },
       {
         "command": "audioEda.inspectFile",
-        "title": "Audio EDA: Open Workspace From Active File"
+        "title": "Audio EDA Preview: Open Workspace From Active File"
       },
       {
         "command": "audioEda.summarizeFolder",
-        "title": "Audio EDA: Summarize Folder"
+        "title": "Audio EDA Preview: Summarize Folder"
       },
       {
         "command": "audioEda.runCastorPrototype",
-        "title": "Audio EDA: Run CASTOR Prototype (2 Classes)"
+        "title": "Audio EDA Preview: Run CASTOR Prototype (2 Classes)"
       }
     ],
     "menus": {
@@ -141,7 +141,7 @@
       "activitybar": [
         {
           "id": "audioEdaActivity",
-          "title": "Audio EDA",
+          "title": "Audio EDA Preview",
           "icon": "media/audio-eda-icon.svg"
         }
       ]
@@ -157,7 +157,7 @@
     "customEditors": [
       {
         "viewType": "audioEda.editor",
-        "displayName": "Audio EDA Workspace",
+        "displayName": "Audio EDA Preview Workspace",
         "selector": [
           {
             "filenamePattern": "*.[wW][aA][vV]"
@@ -194,7 +194,7 @@
       }
     ],
     "configuration": {
-      "title": "Audio EDA",
+      "title": "Audio EDA Preview",
       "properties": {
         "audioEda.toolboxPath": {
           "type": "string",
@@ -205,12 +205,12 @@
         "audioEda.openWorkbenchOnStart": {
           "type": "boolean",
           "default": false,
-          "description": "Open the Audio EDA workbench automatically when the extension activates."
+          "description": "Open the Audio EDA Preview workbench automatically when the extension activates."
         },
         "audioEda.openWorkbenchWhenAudioFileFocused": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically open Audio EDA workbench when an audio file is focused in the editor."
+          "description": "Automatically open Audio EDA Preview workbench when an audio file is focused in the editor."
         }
       }
     }
@@ -231,11 +231,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/johtok/vscode-audio-eda.git"
+    "url": "https://github.com/johtok/vscode-audio-eda-preview.git"
   },
   "bugs": {
-    "url": "https://github.com/johtok/vscode-audio-eda/issues"
+    "url": "https://github.com/johtok/vscode-audio-eda-preview/issues"
   },
-  "homepage": "https://github.com/johtok/vscode-audio-eda#readme",
+  "homepage": "https://github.com/johtok/vscode-audio-eda-preview#readme",
   "icon": "media/marketplace-icon.png"
 }

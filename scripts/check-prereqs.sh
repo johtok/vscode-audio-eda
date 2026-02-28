@@ -10,7 +10,7 @@ check_command() {
   fi
 }
 
-echo "Checking local prerequisites for Audio EDA VS Code extension..."
+echo "Checking local prerequisites for Audio EDA Preview VS Code extension..."
 check_command node
 check_command npm
 check_command git

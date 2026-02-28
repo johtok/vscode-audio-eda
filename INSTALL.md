@@ -65,16 +65,16 @@ Then in VS Code:
 1. Open this repository root.
 2. Press `F5` (or run `Debug: Start Debugging`).
 3. In the Extension Development Host, run commands from Command Palette:
-   - `Audio EDA: Open Workbench`
-   - `Audio EDA: Open Workspace From Active File`
-   - `Audio EDA: Summarize Folder`
-4. Click the `Audio EDA` icon in Activity Bar and open a workspace preset from `Workspaces`.
-5. Load a primary audio clip in the workbench, or use `Reopen Editor With...` on an audio file and select `Audio EDA Workspace`.
-6. For preloaded editor mode, open an audio file and choose `Reopen Editor With...` -> `Audio EDA Workspace`.
+   - `Audio EDA Preview: Open Workbench`
+   - `Audio EDA Preview: Open Workspace From Active File`
+   - `Audio EDA Preview: Summarize Folder`
+4. Click the `Audio EDA Preview` icon in Activity Bar and open a workspace preset from `Workspaces`.
+5. Load a primary audio clip in the workbench, or use `Reopen Editor With...` on an audio file and select `Audio EDA Preview Workspace`.
+6. For preloaded editor mode, open an audio file and choose `Reopen Editor With...` -> `Audio EDA Preview Workspace`.
 
 If you do not see the view:
 
-1. Right-click Activity Bar and ensure `Audio EDA` is enabled.
+1. Right-click Activity Bar and ensure `Audio EDA Preview` is enabled.
 2. Run `View: Open View...` and select `Workspaces`.
 3. Ensure a workspace folder is open.
 4. Run `Developer: Reload Window` in the Extension Development Host.
@@ -114,7 +114,7 @@ Phase-1 implemented transforms:
 
 ### Quick test flow
 
-1. Launch Extension Development Host (`F5`) and run `Audio EDA: Open Workbench`.
+1. Launch Extension Development Host (`F5`) and run `Audio EDA Preview: Open Workbench`.
 2. In the workbench:
    - Choose a primary audio file (`Primary audio clip`).
    - Add rows with `Add View`.

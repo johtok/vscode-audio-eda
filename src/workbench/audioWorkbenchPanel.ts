@@ -88,7 +88,7 @@ export class AudioWorkbenchPanel {
 
     const panel = vscode.window.createWebviewPanel(
       AudioWorkbenchPanel.viewType,
-      "Audio EDA Workbench",
+      "Audio EDA Preview Workbench",
       column,
       {
         enableScripts: true,

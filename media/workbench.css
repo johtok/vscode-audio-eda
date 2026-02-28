@@ -24,6 +24,27 @@ body {
   font-size: 1.2rem;
 }
 
+.hero-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.hero-advanced-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 0.8rem;
+  color: var(--vscode-descriptionForeground);
+  white-space: nowrap;
+}
+
+.hero-advanced-toggle input[type="checkbox"] {
+  margin: 0;
+}
+
 .hero p {
   margin: 8px 0 0;
   color: var(--vscode-descriptionForeground);
@@ -34,6 +55,10 @@ body {
   display: grid;
   grid-template-columns: minmax(300px, 1.2fr) minmax(320px, 1fr);
   gap: 12px;
+}
+
+.layout.layout-advanced-hidden {
+  grid-template-columns: minmax(300px, 1fr);
 }
 
 .panel {
@@ -411,7 +436,8 @@ input.is-locked {
   opacity: 0;
   pointer-events: none;
   transform: translateX(-1px);
-  transition: left 32ms linear, opacity 120ms ease;
+  transition: none;
+  will-change: left, opacity;
 }
 
 .transform-scrollbar {
@@ -463,7 +489,8 @@ input.is-locked {
   background: color-mix(in srgb, #f59e0b 88%, #ffffff 12%);
   pointer-events: none;
   transform: translateX(-1px);
-  transition: left 32ms linear;
+  transition: none;
+  will-change: left;
 }
 
 .transform-caption {
@@ -618,6 +645,10 @@ input.is-locked {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.controls-panel.is-hidden {
+  display: none;
 }
 
 .metrics-report-panel {

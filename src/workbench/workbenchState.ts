@@ -51,6 +51,9 @@ export interface TransformViewItem {
 
 export interface WorkbenchState {
   stack: TransformViewItem[];
+  ui: {
+    showAdvanced: boolean;
+  };
   overlay: {
     enabled: boolean;
     mode: ActivationOverlayMode;
@@ -156,6 +159,9 @@ export function createDefaultWorkbenchState(): WorkbenchState {
         }
       }
     ],
+    ui: {
+      showAdvanced: false
+    },
     overlay: {
       enabled: false,
       mode: "flag",

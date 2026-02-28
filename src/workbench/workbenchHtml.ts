@@ -61,14 +61,20 @@ export function buildWorkbenchHtml(
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="stylesheet" href="${styleUri}" />
-    <title>Audio EDA Workbench</title>
+    <title>Audio EDA Preview Workbench</title>
   </head>
   <body>
     <header class="hero">
-      <h1>Audio EDA Workbench</h1>
+      <div class="hero-top-row">
+        <h1>Audio EDA Preview Workbench</h1>
+        <label class="hero-advanced-toggle" for="show-advanced-toggle">
+          <input id="show-advanced-toggle" type="checkbox" />
+          Show advanced
+        </label>
+      </div>
       <p>Drag to reorder transform/view stack and configure overlays, comparison, and analysis options.</p>
     </header>
-    <main class="layout">
+    <main id="workbench-layout" class="layout">
       <section class="panel stack-panel">
         <div class="panel-header">
           <h2>Stacked Views</h2>
@@ -119,7 +125,8 @@ export function buildWorkbenchHtml(
         </section>
       </section>
 
-      <section class="panel controls-panel">
+      <section id="controls-panel" class="panel controls-panel">
+        <div id="advanced-controls-container">
         <h2>Overlay Activations (CSV)</h2>
         <label class="row">
           <input id="overlay-enabled" type="checkbox" />
@@ -378,6 +385,7 @@ export function buildWorkbenchHtml(
         <label id="multichannel-analysis-row" class="row" for="multichannel-analysis-channel">Single-channel analysis source</label>
         <select id="multichannel-analysis-channel"></select>
         <p id="multichannel-note" class="hint"></p>
+        </div>
       </section>
     </main>
     <script nonce="${nonce}">

@@ -35,7 +35,7 @@ class WorkspacePresetItem extends vscode.TreeItem {
     this.contextValue = "workspacePreset";
     this.command = {
       command: "audioEda.openPresetWorkspace",
-      title: "Open Audio EDA Preset Workspace",
+      title: "Open Audio EDA Preview Preset Workspace",
       arguments: [presetId]
     };
   }
@@ -50,7 +50,7 @@ class RecentWorkspaceItem extends vscode.TreeItem {
     this.contextValue = "recentWorkspace";
     this.command = {
       command: "audioEda.openWorkbenchForFile",
-      title: "Open Recent Audio EDA Workspace",
+      title: "Open Recent Audio EDA Preview Workspace",
       arguments: [vscode.Uri.parse(entry.uri)]
     };
   }

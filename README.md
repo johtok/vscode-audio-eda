@@ -1,12 +1,16 @@
-# vscode-audio-eda
+# Audio EDA Preview
 
 In-editor audio exploration and ML-oriented EDA workspace for VS Code.
 
 This project follows the practical in-editor workflow style of `sukumo28/vscode-audio-preview`, while extending into transform stacks, overlays, metrics, PCA, and analysis tooling.
 
+<p align="center">
+  <img src="./media/v1-showcase.gif" alt="Audio EDA Preview workspace demo" width="960" />
+</p>
+
 ## Features
 
-- Open audio directly in a custom editor: `Reopen Editor With...` -> `Audio EDA Workspace`
+- Open audio directly in a custom editor: `Reopen Editor With...` -> `Audio EDA Preview Workspace`
 - Draggable and keyboard-reorderable stacked views (`Arrow Up/Down`, `Home`, `End`)
 - Transform views:
   - `timeseries`
@@ -42,23 +46,23 @@ This project follows the practical in-editor workflow style of `sukumo28/vscode-
 4. Open this repository root in VS Code.
 5. Press `F5` to launch Extension Development Host.
 6. In the dev host:
-   - open an audio file and run `Reopen Editor With...` -> `Audio EDA Workspace`
-   - or run `Audio EDA: Open Workbench`
+   - open an audio file and run `Reopen Editor With...` -> `Audio EDA Preview Workspace`
+   - or run `Audio EDA Preview: Open Workbench`
 
 ## Commands
 
-- `Audio EDA: Open Workbench`
-- `Audio EDA: Open General Workspace Preset`
-- `Audio EDA: Open Transform Lab Preset`
-- `Audio EDA: Open Metrics Preset`
-- `Audio EDA: Open PCA Preset`
-- `Audio EDA: Open Workspace For Audio File`
-- `Audio EDA: Reopen Active Editor With Audio EDA`
-- `Audio EDA: Toggle Auto-Open On Audio Focus`
-- `Audio EDA: Open Extension Settings`
-- `Audio EDA: Open Workspace From Active File`
-- `Audio EDA: Summarize Folder`
-- `Audio EDA: Run CASTOR Prototype (2 Classes)`
+- `Audio EDA Preview: Open Workbench`
+- `Audio EDA Preview: Open General Workspace Preset`
+- `Audio EDA Preview: Open Transform Lab Preset`
+- `Audio EDA Preview: Open Metrics Preset`
+- `Audio EDA Preview: Open PCA Preset`
+- `Audio EDA Preview: Open Workspace For Audio File`
+- `Audio EDA Preview: Reopen Active Editor With Audio EDA Preview`
+- `Audio EDA Preview: Toggle Auto-Open On Audio Focus`
+- `Audio EDA Preview: Open Extension Settings`
+- `Audio EDA Preview: Open Workspace From Active File`
+- `Audio EDA Preview: Summarize Folder`
+- `Audio EDA Preview: Run CASTOR Prototype (2 Classes)`
 
 ## Settings
 

@@ -1,4 +1,4 @@
-# TODO - VS Code Audio EDA Extension
+# TODO - VS Code Audio EDA Preview Extension
 
 Focus: extension + webview implementation only.
 Toolbox/backend tasks are tracked separately in `../python-toolbox/TODO.md`.

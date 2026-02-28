@@ -125,6 +125,9 @@
 
   const DEFAULT_BOOTSTRAP_STATE = {
     stack: [],
+    ui: {
+      showAdvanced: false
+    },
     overlay: {
       enabled: false,
       mode: "flag",
@@ -173,6 +176,7 @@
   ensureComparisonState();
   ensureAnalysisState();
   ensureTransformParamState();
+  ensureUiState();
   normalizeLegacyTransformKinds();
   normalizeStackItems();
 
@@ -181,6 +185,10 @@
   const stackA11yStatus = byId("stack-a11y-status");
   const addTransformButton = byId("add-transform");
   const renderStackContainer = byId("transform-render-stack");
+  const workbenchLayout = byId("workbench-layout");
+  const controlsPanel = byId("controls-panel");
+  const advancedControlsContainer = byId("advanced-controls-container");
+  const showAdvancedToggle = byId("show-advanced-toggle");
 
   const primaryAudioFileInput = byId("primary-audio-file");
   const primaryAudioFileLocked = byId("primary-audio-file-locked");
@@ -309,6 +317,7 @@
   let pendingStackHandleFocusId = null;
   let primaryAudio = null;
   let primaryAudioUrl = null;
+  let pendingSeekSeconds = Number.NaN;
   let primaryAudioLocked = false;
   let comparisonAudioData = null;
   let customFilterbank = null;
@@ -571,6 +580,11 @@
 
       if (Array.isArray(restoredState.stack)) {
         merged.stack = sanitizeStackCollection(restoredState.stack);
+      }
+
+      const ui = asRecord(restoredState.ui);
+      if (ui) {
+        merged.ui.showAdvanced = sanitizeBooleanValue(ui.showAdvanced, merged.ui.showAdvanced);
       }
 
       const overlay = asRecord(restoredState.overlay);
@@ -846,6 +860,15 @@
         }
       }
     }
+  }
+
+  function ensureUiState() {
+    if (!state.ui || typeof state.ui !== "object") {
+      state.ui = { showAdvanced: false };
+      return;
+    }
+
+    state.ui.showAdvanced = sanitizeBooleanValue(state.ui.showAdvanced, false);
   }
 
   function ensureOverlayState() {
@@ -1400,8 +1423,17 @@
     comparisonTrimDurationSeconds.disabled = disabled;
   }
 
+  function syncAdvancedControlsVisibility() {
+    const showAdvanced = Boolean(state.ui && state.ui.showAdvanced);
+    showAdvancedToggle.checked = showAdvanced;
+    controlsPanel.classList.toggle("is-hidden", !showAdvanced);
+    workbenchLayout.classList.toggle("layout-advanced-hidden", !showAdvanced);
+    advancedControlsContainer.setAttribute("aria-hidden", showAdvanced ? "false" : "true");
+  }
+
   function syncControlsFromState() {
     const histogramConfig = getMetricsHistogramConfig();
+    syncAdvancedControlsVisibility();
     overlayEnabled.checked = state.overlay.enabled;
     overlayMode.value = state.overlay.mode;
     overlayFlagColor.value = sanitizeHexColor(state.overlay.flagColor, DEFAULT_FLAG_OVERLAY_COLOR);
@@ -9470,7 +9502,29 @@
     return Number.isFinite(globalRatio) ? clamp(globalRatio, 0, 1) : clampedLocal;
   }
 
+  function applyPendingSeekIfReady() {
+    if (!Number.isFinite(pendingSeekSeconds)) {
+      return;
+    }
+
+    const duration = Number(primaryAudioPlayer.duration);
+    if (!Number.isFinite(duration) || duration <= 0) {
+      return;
+    }
+
+    const target = clamp(pendingSeekSeconds, 0, duration);
+    try {
+      primaryAudioPlayer.currentTime = target;
+      pendingSeekSeconds = Number.NaN;
+      updateAnimatedPlayheads();
+    } catch {
+      // keep pending and retry when metadata/seekability updates
+    }
+  }
+
   function seekAudioAtGlobalRatio(globalRatio) {
+    const clamped = Number.isFinite(Number(globalRatio)) ? clamp(Number(globalRatio), 0, 1) : 0;
+
     const playerDuration = Number(primaryAudioPlayer.duration);
     const decodedDuration = primaryAudio ? Number(primaryAudio.duration) : Number.NaN;
     const duration =
@@ -9479,12 +9533,24 @@
         : Number.isFinite(decodedDuration) && decodedDuration > 0
           ? decodedDuration
           : 0;
+
     if (duration <= 0) {
       return;
     }
 
-    const clamped = Number.isFinite(Number(globalRatio)) ? clamp(Number(globalRatio), 0, 1) : 0;
-    primaryAudioPlayer.currentTime = clamped * duration;
+    const targetSeconds = clamped * duration;
+    pendingSeekSeconds = targetSeconds;
+
+    try {
+      primaryAudioPlayer.currentTime = targetSeconds;
+      if (Number.isFinite(Number(primaryAudioPlayer.duration)) && Number(primaryAudioPlayer.duration) > 0) {
+        pendingSeekSeconds = Number.NaN;
+      }
+    } catch {
+      // fallback handled by applyPendingSeekIfReady listeners
+    }
+
+    updateAnimatedPlayheads();
   }
 
   function isTypingTarget(target) {
@@ -9595,6 +9661,7 @@
     }
 
     primaryAudioUrl = sourceUrl;
+    pendingSeekSeconds = Number.NaN;
     primaryAudioPlayer.src = sourceUrl;
 
     setPrimaryAudioInputLocked(lockInput, sourceName);
@@ -9627,6 +9694,7 @@
     }
 
     primaryAudioUrl = sourceUrl;
+    pendingSeekSeconds = Number.NaN;
     primaryAudioPlayer.src = sourceUrl;
 
     setPrimaryAudioInputLocked(lockInput, sourceName);
@@ -9787,6 +9855,36 @@
     }
   }
 
+  function guessAudioMimeTypeFromName(fileName) {
+    const name = typeof fileName === "string" ? fileName.toLowerCase() : "";
+    if (name.endsWith(".wav")) return "audio/wav";
+    if (name.endsWith(".flac")) return "audio/flac";
+    if (name.endsWith(".mp3")) return "audio/mpeg";
+    if (name.endsWith(".mpga")) return "audio/mpeg";
+    if (name.endsWith(".mpeg")) return "audio/mpeg";
+    if (name.endsWith(".ogg")) return "audio/ogg";
+    if (name.endsWith(".m4a")) return "audio/mp4";
+    if (name.endsWith(".aac")) return "audio/aac";
+    if (name.endsWith(".opus")) return "audio/opus";
+    if (name.endsWith(".sph")) return "audio/basic";
+    return "";
+  }
+
+  function createPlaybackUrlFromBytes(arrayBuffer, contentType, fallbackUrl) {
+    try {
+      const type =
+        typeof contentType === "string" && contentType.trim()
+          ? contentType.trim()
+          : undefined;
+      const blob = type
+        ? new Blob([arrayBuffer], { type })
+        : new Blob([arrayBuffer]);
+      return URL.createObjectURL(blob);
+    } catch {
+      return fallbackUrl;
+    }
+  }
+
   async function preloadAudioFromWebviewUri(uri, fileName) {
     setAudioStatus("Loading preselected workspace audio ...");
 
@@ -9858,12 +9956,18 @@
       return;
     }
 
+    const playbackUrl = createPlaybackUrlFromBytes(
+      arrayBuffer,
+      response.headers.get("content-type") || guessAudioMimeTypeFromName(fileName),
+      uri
+    );
+
     try {
       const decoded = await decodeAudioArrayBufferToMono(arrayBuffer, fileName);
-      loadDecodedAudio(decoded, uri, fileName, true);
+      loadDecodedAudio(decoded, playbackUrl, fileName, true);
     } catch (error) {
       loadPlaybackOnlyAudio(
-        uri,
+        playbackUrl,
         fileName,
         true,
         "Decode failed; playback-only mode. " + toErrorText(error)
@@ -14018,11 +14122,23 @@
       updateAnimatedPlayheads();
     }
 
+    function seekFromCanvasMouseEvent(event) {
+      const rect = canvas.getBoundingClientRect();
+      const hasOffset =
+        event && event.target === canvas && Number.isFinite(Number(event.offsetX));
+      const localRatio = hasOffset
+        ? clamp(Number(event.offsetX) / Math.max(1, canvas.clientWidth || rect.width), 0, 1)
+        : clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+      const globalRatio = localRatioToGlobalRatio(item.id, renderSpec.domainLength, localRatio);
+      seekAudioAtGlobalRatio(globalRatio);
+      updateAnimatedPlayheads();
+    }
+
     function beginInteraction(mode, event) {
       const selectionChanged = selectView(item.id, true);
 
       if (mode === "seek") {
-        seekFromClientX(event.clientX);
+        seekFromCanvasMouseEvent(event);
         mouseInteraction = {
           mode,
           selectionChanged
@@ -14824,6 +14940,40 @@
     }
   }
 
+  function getCurrentPlaybackGlobalRatio(durationSeconds) {
+    const duration = Number(durationSeconds);
+    if (!Number.isFinite(duration) || duration <= 0) {
+      return Number.NaN;
+    }
+
+    const currentTime = Number(primaryAudioPlayer.currentTime);
+    if (!Number.isFinite(currentTime)) {
+      return Number.NaN;
+    }
+
+    return clamp(currentTime / Math.max(1e-9, duration), 0, 1);
+  }
+
+  function setViewportPlayheadForWindow(playhead, domainLength, windowInfo, globalRatio) {
+    if (!playhead || !Number.isFinite(globalRatio) || !Number.isFinite(domainLength) || domainLength <= 0) {
+      if (playhead) {
+        playhead.style.opacity = "0";
+      }
+      return;
+    }
+
+    const globalIndex = globalRatio * Math.max(1, domainLength - 1);
+    const localRatio =
+      (globalIndex - windowInfo.startIndex) / Math.max(1, windowInfo.visibleCount - 1);
+
+    if (localRatio >= 0 && localRatio <= 1) {
+      playhead.style.opacity = "1";
+      playhead.style.left = (localRatio * 100).toFixed(4) + "%";
+    } else {
+      playhead.style.opacity = "0";
+    }
+  }
+
   function renderTransformStack() {
     cleanupViewStateCache();
     playheadElementsByViewId.clear();
@@ -14981,6 +15131,13 @@
 
           const viewportPlayhead = document.createElement("div");
           viewportPlayhead.className = "transform-playhead";
+          const initialGlobalRatio = getCurrentPlaybackGlobalRatio(panelPrimaryRenderSpec.durationSeconds);
+          setViewportPlayheadForWindow(
+            viewportPlayhead,
+            panelPrimaryRenderSpec.domainLength,
+            panelWindowInfo,
+            initialGlobalRatio
+          );
           viewportPlayheads.push(viewportPlayhead);
 
           viewport.appendChild(canvas);
@@ -15016,6 +15173,13 @@
 
         const windowInfo = firstWindowInfo || computeViewWindow(primaryRenderSpec.domainLength, item.id);
         const scrollbar = buildTransformScrollbar(item, primaryRenderSpec);
+        const initialGlobalRatio = getCurrentPlaybackGlobalRatio(primaryRenderSpec.durationSeconds);
+        if (Number.isFinite(initialGlobalRatio)) {
+          scrollbar.playhead.style.left = (initialGlobalRatio * 100).toFixed(4) + "%";
+          scrollbar.playhead.style.opacity = "1";
+        } else {
+          scrollbar.playhead.style.opacity = "0";
+        }
         body.appendChild(scrollbar.element);
 
         if (!splitByChannel && primaryRenderSpec.type === "waveform") {
@@ -15098,6 +15262,7 @@
           playhead.style.opacity = "0";
         });
         entry.scrollbarPlayhead.style.left = "0%";
+        entry.scrollbarPlayhead.style.opacity = "0";
       });
       return;
     }
@@ -15110,20 +15275,13 @@
 
     playheadElementsByViewId.forEach(function (entry, viewId) {
       const windowInfo = computeViewWindow(entry.domainLength, viewId);
-      const globalIndex = globalRatio * Math.max(1, entry.domainLength - 1);
-      const localRatio =
-        (globalIndex - windowInfo.startIndex) / Math.max(1, windowInfo.visibleCount - 1);
 
       entry.viewportPlayheads.forEach(function (playhead) {
-        if (localRatio >= 0 && localRatio <= 1) {
-          playhead.style.opacity = "1";
-          playhead.style.left = (localRatio * 100).toFixed(4) + "%";
-        } else {
-          playhead.style.opacity = "0";
-        }
+        setViewportPlayheadForWindow(playhead, entry.domainLength, windowInfo, globalRatio);
       });
 
       entry.scrollbarPlayhead.style.left = (globalRatio * 100).toFixed(4) + "%";
+      entry.scrollbarPlayhead.style.opacity = "1";
     });
   }
 
@@ -15181,6 +15339,9 @@
   primaryAudioPlayer.addEventListener("ended", stopPlayheadAnimation);
   primaryAudioPlayer.addEventListener("timeupdate", updateAnimatedPlayheads);
   primaryAudioPlayer.addEventListener("seeked", updateAnimatedPlayheads);
+  primaryAudioPlayer.addEventListener("loadedmetadata", applyPendingSeekIfReady);
+  primaryAudioPlayer.addEventListener("durationchange", applyPendingSeekIfReady);
+  primaryAudioPlayer.addEventListener("canplay", applyPendingSeekIfReady);
 
   window.addEventListener("keydown", function (event) {
     if (!(event.code === "Space" || event.key === " ")) {
@@ -15197,6 +15358,12 @@
 
   customFilterbankInput.addEventListener("change", function () {
     void onCustomFilterbankSelected();
+  });
+
+  showAdvancedToggle.addEventListener("change", function () {
+    state.ui.showAdvanced = showAdvancedToggle.checked;
+    syncAdvancedControlsVisibility();
+    postState();
   });
 
   window.addEventListener("message", function (event) {

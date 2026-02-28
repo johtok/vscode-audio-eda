@@ -6,3 +6,5 @@ out-test/
 
 __pycache__/
 *.pyc
+
+media/v1-showcase.mp4
