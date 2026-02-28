@@ -710,6 +710,23 @@ async function resolveFolderPath(uri?: vscode.Uri): Promise<string | undefined> 
   return selected?.[0]?.fsPath;
 }
 
+async function resolveCsvPath(
+  title: string,
+  buttonLabel: string
+): Promise<string | undefined> {
+  const selected = await vscode.window.showOpenDialog({
+    canSelectFolders: false,
+    canSelectFiles: true,
+    canSelectMany: false,
+    title,
+    openLabel: buttonLabel,
+    filters: {
+      "CSV files": ["csv"]
+    }
+  });
+  return selected?.[0]?.fsPath;
+}
+
 function handleToolboxError(channel: vscode.OutputChannel, error: unknown): void {
   if (error instanceof ToolboxInvocationError) {
     channel.appendLine(`[toolbox] ${error.message}`);
@@ -1005,6 +1022,166 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   );
 
+  const runCastorPrototypeCommand = vscode.commands.registerCommand(
+    "audioEda.runCastorPrototype",
+    async (uri?: vscode.Uri) => {
+      const classAFolder = await resolveFolderPath(uri);
+      if (!classAFolder) {
+        return;
+      }
+
+      const classBFolder = await resolveFolderPath();
+      if (!classBFolder) {
+        return;
+      }
+
+      if (classAFolder === classBFolder) {
+        void vscode.window.showWarningMessage(
+          "CASTOR requires two distinct class folders."
+        );
+        return;
+      }
+
+      const includeSegments = await vscode.window.showQuickPick(
+        [
+          {
+            label: "No Segment CSVs (Recommended)",
+            value: "none",
+            description: "Use full timeseries files from both class folders"
+          },
+          {
+            label: "Use Segment CSVs",
+            value: "segments",
+            description: "Provide segment CSV for each class"
+          }
+        ],
+        {
+          title: "CASTOR Prototype",
+          placeHolder: "Optional segment slicing inputs"
+        }
+      );
+      if (!includeSegments) {
+        return;
+      }
+
+      let segmentsA: string | undefined;
+      let segmentsB: string | undefined;
+      let segmentsUnit: "samples" | "seconds" = "samples";
+      if (includeSegments.value === "segments") {
+        segmentsA = await resolveCsvPath("Select Segment CSV for Class A", "Use for Class A");
+        if (!segmentsA) {
+          return;
+        }
+        segmentsB = await resolveCsvPath("Select Segment CSV for Class B", "Use for Class B");
+        if (!segmentsB) {
+          return;
+        }
+        const unitPick = await vscode.window.showQuickPick(
+          [
+            {
+              label: "samples",
+              value: "samples",
+              description: "Use start/end as sample indices (or t_start/t_end in seconds)"
+            },
+            {
+              label: "seconds",
+              value: "seconds",
+              description: "Use start/end as seconds when t_start/t_end are not present"
+            }
+          ],
+          {
+            title: "CASTOR Prototype",
+            placeHolder: "Segment CSV default unit"
+          }
+        );
+        if (!unitPick) {
+          return;
+        }
+        segmentsUnit = unitPick.value as "samples" | "seconds";
+      }
+
+      const padLengthText = await vscode.window.showInputBox({
+        title: "CASTOR Prototype",
+        prompt: "Optional fixed pad length (leave empty to infer from data)",
+        placeHolder: "e.g. 16000",
+        validateInput: (value) => {
+          const trimmed = value.trim();
+          if (!trimmed) {
+            return undefined;
+          }
+          const numeric = Number(trimmed);
+          if (!Number.isInteger(numeric) || numeric <= 0) {
+            return "Pad length must be a positive integer.";
+          }
+          return undefined;
+        }
+      });
+      if (padLengthText === undefined) {
+        return;
+      }
+      const padLength = padLengthText.trim() ? Number(padLengthText.trim()) : undefined;
+
+      const normalizePick = await vscode.window.showQuickPick(
+        [
+          {
+            label: "Normalize Sequences (Recommended)",
+            value: "normalize",
+            description: "Apply per-instance z-normalization"
+          },
+          {
+            label: "Disable Normalization",
+            value: "no_normalize",
+            description: "Keep original amplitude scaling"
+          }
+        ],
+        {
+          title: "CASTOR Prototype",
+          placeHolder: "Normalization mode"
+        }
+      );
+      if (!normalizePick) {
+        return;
+      }
+
+      const args = ["castor-prototype", classAFolder, classBFolder];
+      if (segmentsA && segmentsB) {
+        args.push("--segments-a", segmentsA, "--segments-b", segmentsB, "--segments-unit", segmentsUnit);
+      }
+      if (typeof padLength === "number" && Number.isFinite(padLength) && padLength > 0) {
+        args.push("--pad-length", String(Math.round(padLength)));
+      }
+      if (normalizePick.value === "no_normalize") {
+        args.push("--no-normalize");
+      }
+      args.push("--json");
+
+      output.show(true);
+      output.appendLine(
+        `[castor] class_a=${classAFolder} class_b=${classBFolder} segments=${segmentsA && segmentsB ? "yes" : "no"}`
+      );
+
+      try {
+        const cwd = getWorkspaceRoot() ?? path.dirname(classAFolder);
+        const payload = await runToolboxJson(args, cwd);
+        logJson(output, "[castor] result", payload);
+
+        const record = asRecord(payload);
+        const accuracy = Number(record?.training_accuracy);
+        const instanceCount = Number(record?.instance_count);
+        void vscode.window.showInformationMessage(
+          "Audio EDA CASTOR prototype complete. " +
+            "instances=" +
+            (Number.isFinite(instanceCount) ? String(Math.round(instanceCount)) : "n/a") +
+            ", training_accuracy=" +
+            (Number.isFinite(accuracy) ? (accuracy * 100).toFixed(2) + "%" : "n/a") +
+            "."
+        );
+      } catch (error: unknown) {
+        handleToolboxError(output, error);
+      }
+    }
+  );
+
   context.subscriptions.push(
     output,
     sidebarTree,
@@ -1019,7 +1196,8 @@ export function activate(context: vscode.ExtensionContext): void {
     toggleAutoOpenOnFocusCommand,
     openExtensionSettingsCommand,
     inspectFileCommand,
-    summarizeFolderCommand
+    summarizeFolderCommand,
+    runCastorPrototypeCommand
   );
 
   const shouldOpenWorkbenchOnStart = getConfig().get<boolean>("openWorkbenchOnStart", false);

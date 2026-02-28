@@ -23,6 +23,7 @@ Template VS Code extension for audio EDA and ML workflows, aligned with the offi
    - `Audio EDA: Open PCA Preset`
    - `Audio EDA: Inspect File`
    - `Audio EDA: Summarize Folder`
+   - `Audio EDA: Run CASTOR Prototype (2 Classes)`
 7. In the workbench, load a primary audio clip and add/reorder transform rows.
 8. In the `Audio EDA` Activity Bar icon, use `Workspace Presets` to launch a preconfigured workspace.
 9. When a workspace is opened from an audio file (Explorer context or `Reopen Editor With...`), the audio is preloaded and the primary selector is locked.

@@ -177,6 +177,18 @@ Delivery slices:
 2. pattern-forest training/evaluation hooks for labeled time series
 3. pattern importance explorer (top symbolic patterns + per-class support)
 
+## Phase 12: CASTOR Prototype Workflow (Priority 12)
+
+Goal: expose a practical two-class CASTOR prototype workflow from VS Code commands and sidebar actions.
+
+Status: `in progress` (command flow + toolbox integration added; UI embedding/report visuals pending).
+
+Delivery slices:
+
+1. extension command flow to select class A/B folders and optional segment CSVs
+2. toolbox execution + JSON logging + run summary notification
+3. optional in-workbench visualization/report panel for CASTOR outputs
+
 ## Implementation Backbone (Cross-cutting)
 
 - Stable CLI contract with Python toolbox (`inspect`, `summarize`, `metrics`, `features`, `pca`)

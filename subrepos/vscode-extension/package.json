@@ -33,7 +33,8 @@
     "onCommand:audioEda.toggleAutoOpenOnFocus",
     "onCommand:audioEda.openExtensionSettings",
     "onCommand:audioEda.inspectFile",
-    "onCommand:audioEda.summarizeFolder"
+    "onCommand:audioEda.summarizeFolder",
+    "onCommand:audioEda.runCastorPrototype"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -81,6 +82,10 @@
       {
         "command": "audioEda.summarizeFolder",
         "title": "Audio EDA: Summarize Folder"
+      },
+      {
+        "command": "audioEda.runCastorPrototype",
+        "title": "Audio EDA: Run CASTOR Prototype (2 Classes)"
       }
     ],
     "menus": {
@@ -94,6 +99,11 @@
           "command": "audioEda.summarizeFolder",
           "when": "explorerResourceIsFolder",
           "group": "navigation@11"
+        },
+        {
+          "command": "audioEda.runCastorPrototype",
+          "when": "explorerResourceIsFolder",
+          "group": "navigation@12"
         }
       ],
       "view/title": [
@@ -131,6 +141,11 @@
           "command": "audioEda.openExtensionSettings",
           "when": "view == audioEdaSidebar",
           "group": "navigation@7"
+        },
+        {
+          "command": "audioEda.runCastorPrototype",
+          "when": "view == audioEdaSidebar",
+          "group": "navigation@8"
         }
       ]
     },
