@@ -63,6 +63,7 @@ const VALID_PCA_GOALS = new Set([
   "doa_beamforming",
   "enhancement"
 ]);
+const VALID_ANALYSIS_TOOLS = new Set(["rcluster", "random_forest", "spf"]);
 const VALID_STFT_WINDOW_TYPES = new Set(["hann", "hamming", "blackman", "rectangular"]);
 const VALID_STFT_MODES = new Set(["magnitude", "phase"]);
 
@@ -417,6 +418,15 @@ function sanitizeWorkbenchStatePayload(rawState: unknown): unknown | undefined {
       | "enhancement";
     sanitized.pca.classwise = sanitizeBoolean(pca.classwise, sanitized.pca.classwise);
     sanitized.pca.componentSelection = sanitizeNullableString(pca.componentSelection, 128);
+  }
+
+  const analysis = asRecord(record.analysis);
+  if (analysis) {
+    sanitized.analysis.tool = sanitizeEnumValue(
+      analysis.tool,
+      VALID_ANALYSIS_TOOLS,
+      sanitized.analysis.tool
+    ) as "rcluster" | "random_forest" | "spf";
   }
 
   const multichannel = asRecord(record.multichannel);

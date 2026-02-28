@@ -21,6 +21,7 @@ export type ComparisonMode =
 export type PcaGoal = "eda" | "classification" | "denoising" | "doa_beamforming" | "enhancement";
 export type StftWindowType = "hann" | "hamming" | "blackman" | "rectangular";
 export type StftMode = "magnitude" | "phase";
+export type AnalysisTool = "rcluster" | "random_forest" | "spf";
 
 export interface TransformViewItem {
   id: string;
@@ -83,6 +84,9 @@ export interface WorkbenchState {
     goal: PcaGoal;
     classwise: boolean;
     componentSelection: string | null;
+  };
+  analysis: {
+    tool: AnalysisTool;
   };
   multichannel: {
     enabled: boolean;
@@ -183,6 +187,9 @@ export function createDefaultWorkbenchState(): WorkbenchState {
       goal: "eda",
       classwise: false,
       componentSelection: null
+    },
+    analysis: {
+      tool: "random_forest"
     },
     multichannel: {
       enabled: false,

@@ -43,6 +43,7 @@
     "custom_filterbank"
   ];
   const OVERLAY_MODES = ["flag", "timestamped"];
+  const ANALYSIS_TOOLS = ["rcluster", "random_forest", "spf"];
   const WORKSPACE_PRESET_IDS = ["default", "transforms", "metrics", "pca"];
   const DEFAULT_FLAG_OVERLAY_COLOR = "#ef4444";
   const MAX_STACK_ITEMS = 24;
@@ -61,6 +62,9 @@
   const MAX_FILTERBANK_COLUMNS = 8192;
   const RCLUSTER_MAX_ROWS = 2500;
   const RCLUSTER_MAX_COLUMNS = 256;
+  const RANDOM_FOREST_MAX_ROWS = 4000;
+  const RANDOM_FOREST_MAX_COLUMNS = 384;
+  const RANDOM_FOREST_MIN_CLASS_FRAMES = 4;
   const METRICS_HISTOGRAM_BINS = 128;
   const METRICS_HISTOGRAM_RANGE_MIN = -10;
   const METRICS_HISTOGRAM_RANGE_MAX = 10;
@@ -143,6 +147,7 @@
       shortTimeAutocorrelation: false
     },
     pca: { enabled: false, goal: "eda", classwise: false, componentSelection: null },
+    analysis: { tool: "random_forest" },
     multichannel: { enabled: false, splitViewsByChannel: true, analysisChannelIndex: 0 },
     transformParams: DEFAULT_TRANSFORM_PARAMS
   };
@@ -157,6 +162,7 @@
   );
   ensureOverlayState();
   ensureComparisonState();
+  ensureAnalysisState();
   ensureTransformParamState();
   normalizeLegacyTransformKinds();
   normalizeStackItems();
@@ -220,6 +226,10 @@
   const pcaClasswise = byId("pca-classwise");
   const pcaComponents = byId("pca-components");
   const pcaGuidance = byId("pca-guidance");
+  const analysisToolSelect = byId("analysis-tool-select");
+  const analysisPanelRcluster = byId("analysis-panel-rcluster");
+  const analysisPanelRandomForest = byId("analysis-panel-random-forest");
+  const analysisPanelSpf = byId("analysis-panel-spf");
 
   const multichannelEnabled = byId("multichannel-enabled");
   const multichannelSplit = byId("multichannel-split");
@@ -242,6 +252,19 @@
   const rclusterProgress = byId("rcluster-progress");
   const rclusterStatus = byId("rcluster-status");
   const rclusterResults = byId("rcluster-results");
+  const rfSource = byId("rf-source");
+  const rfFeatureHint = byId("rf-feature-hint");
+  const rfLabelHint = byId("rf-label-hint");
+  const rfTreeCount = byId("rf-tree-count");
+  const rfMaxDepth = byId("rf-max-depth");
+  const rfMinLeaf = byId("rf-min-leaf");
+  const rfFeatureRatio = byId("rf-feature-ratio");
+  const rfMaxFrames = byId("rf-max-frames");
+  const rfTopFeatures = byId("rf-top-features");
+  const rfRun = byId("rf-run");
+  const rfProgress = byId("rf-progress");
+  const rfStatus = byId("rf-status");
+  const rfResults = byId("rf-results");
 
   const spfSource = byId("spf-source");
   const spfFeatureHint = byId("spf-feature-hint");
@@ -276,6 +299,11 @@
   let rClusterRunning = false;
   let rClusterProgressIntervalId = null;
   let rClusterProgressResetTimerId = null;
+  let activeAnalysisTool = "random_forest";
+  let randomForestSourceMode = "mel";
+  let randomForestRunning = false;
+  let randomForestResult = null;
+  let randomForestLastRunContext = null;
   let spfSourceMode = "mel";
   let spfRunning = false;
   let spfResult = null;
@@ -441,6 +469,13 @@
     return fallback;
   }
 
+  function sanitizeAnalysisTool(rawTool, fallback) {
+    if (typeof rawTool === "string" && ANALYSIS_TOOLS.indexOf(rawTool) !== -1) {
+      return rawTool;
+    }
+    return fallback;
+  }
+
   function estimateStateByteSize(value) {
     try {
       const serialized = JSON.stringify(value);
@@ -602,6 +637,11 @@
         merged.pca.goal = sanitizePcaGoal(pca.goal, merged.pca.goal);
         merged.pca.classwise = sanitizeBooleanValue(pca.classwise, merged.pca.classwise);
         merged.pca.componentSelection = sanitizeStringValue(pca.componentSelection, 128);
+      }
+
+      const analysis = asRecord(restoredState.analysis);
+      if (analysis) {
+        merged.analysis.tool = sanitizeAnalysisTool(analysis.tool, merged.analysis.tool);
       }
 
       const multichannel = asRecord(restoredState.multichannel);
@@ -804,6 +844,14 @@
     }
 
     state.comparison.offsetSeconds = sanitizeFloat(state.comparison.offsetSeconds, 0, -30, 30);
+  }
+
+  function ensureAnalysisState() {
+    if (!state.analysis || typeof state.analysis !== "object") {
+      state.analysis = { tool: "random_forest" };
+      return;
+    }
+    state.analysis.tool = sanitizeAnalysisTool(state.analysis.tool, "random_forest");
   }
 
   function createEmptyDerivedCache() {
@@ -1281,12 +1329,19 @@
     pcaGoal.value = state.pca.goal;
     pcaClasswise.checked = state.pca.classwise;
     pcaComponents.value = state.pca.componentSelection || "";
+    state.analysis.tool = sanitizeAnalysisTool(
+      state.analysis && state.analysis.tool,
+      "random_forest"
+    );
+    activeAnalysisTool = state.analysis.tool;
+    analysisToolSelect.value = activeAnalysisTool;
 
     updateMultichannelControlsFromAudio();
 
     syncTransformParamControls();
     updateOverlayCsvHint();
     updatePcaGuidance();
+    updateAnalysisToolPanelVisibility();
   }
 
   function createPersistableStateSnapshot() {
@@ -2897,6 +2952,557 @@
     return group;
   }
 
+  function analysisPaletteColor(index) {
+    const palette = [
+      "#38bdf8",
+      "#f59e0b",
+      "#34d399",
+      "#f472b6",
+      "#a78bfa",
+      "#f87171",
+      "#22d3ee",
+      "#facc15",
+      "#4ade80",
+      "#fb7185"
+    ];
+    return palette[Math.abs(index) % palette.length];
+  }
+
+  function createAnalysisVizCard(title, subtitle) {
+    const card = document.createElement("section");
+    card.className = "metrics-group analysis-viz-card";
+
+    const heading = document.createElement("h3");
+    heading.textContent = title;
+    card.appendChild(heading);
+
+    if (typeof subtitle === "string" && subtitle.trim().length > 0) {
+      const text = document.createElement("p");
+      text.className = "analysis-viz-subtitle";
+      text.textContent = subtitle;
+      card.appendChild(text);
+    }
+
+    return card;
+  }
+
+  function createAnalysisCanvas(width, height) {
+    const canvas = document.createElement("canvas");
+    canvas.className = "analysis-viz-canvas";
+    canvas.width = width;
+    canvas.height = height;
+    return canvas;
+  }
+
+  function drawAnalysisScatter(canvas, points, categoryLabels) {
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+    const width = canvas.width;
+    const height = canvas.height;
+    const padLeft = 34;
+    const padRight = 12;
+    const padTop = 12;
+    const padBottom = 24;
+    const plotWidth = Math.max(8, width - padLeft - padRight);
+    const plotHeight = Math.max(8, height - padTop - padBottom);
+
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = "#0b1220";
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = "rgba(90,140,170,0.14)";
+    ctx.fillRect(padLeft, padTop, plotWidth, plotHeight);
+
+    if (!Array.isArray(points) || points.length === 0) {
+      ctx.fillStyle = "rgba(210,210,210,0.9)";
+      ctx.font = "11px sans-serif";
+      ctx.fillText("No map data.", padLeft + 8, padTop + 18);
+      return;
+    }
+
+    let minX = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+    for (let index = 0; index < points.length; index += 1) {
+      const point = points[index];
+      const x = Number(point.x);
+      const y = Number(point.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        continue;
+      }
+      if (x < minX) {
+        minX = x;
+      }
+      if (x > maxX) {
+        maxX = x;
+      }
+      if (y < minY) {
+        minY = y;
+      }
+      if (y > maxY) {
+        maxY = y;
+      }
+    }
+
+    if (!Number.isFinite(minX) || !Number.isFinite(maxX)) {
+      minX = -1;
+      maxX = 1;
+    }
+    if (!Number.isFinite(minY) || !Number.isFinite(maxY)) {
+      minY = -1;
+      maxY = 1;
+    }
+    if (Math.abs(maxX - minX) < 1e-9) {
+      minX -= 1;
+      maxX += 1;
+    }
+    if (Math.abs(maxY - minY) < 1e-9) {
+      minY -= 1;
+      maxY += 1;
+    }
+
+    const toX = function (value) {
+      return padLeft + ((value - minX) / (maxX - minX)) * plotWidth;
+    };
+    const toY = function (value) {
+      return padTop + (1 - (value - minY) / (maxY - minY)) * plotHeight;
+    };
+
+    const legendMap = new Map();
+    for (let index = 0; index < points.length; index += 1) {
+      const point = points[index];
+      const x = Number(point.x);
+      const y = Number(point.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        continue;
+      }
+      const category = String(point.category || "group-0");
+      const categoryIndex = sanitizeInt(point.categoryIndex, 0, 0, 1000000);
+      const color = analysisPaletteColor(categoryIndex);
+      if (!legendMap.has(category)) {
+        legendMap.set(category, color);
+      }
+
+      ctx.fillStyle = color;
+      const px = toX(x);
+      const py = toY(y);
+      ctx.globalAlpha = point.highlighted ? 1 : 0.84;
+      ctx.beginPath();
+      ctx.arc(px, py, point.highlighted ? 3.4 : 2.3, 0, Math.PI * 2);
+      ctx.fill();
+      if (point.highlighted) {
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = "rgba(255,255,255,0.92)";
+        ctx.lineWidth = 0.9;
+        ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    ctx.strokeStyle = "rgba(170,210,235,0.8)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padLeft, padTop);
+    ctx.lineTo(padLeft, padTop + plotHeight);
+    ctx.lineTo(padLeft + plotWidth, padTop + plotHeight);
+    ctx.stroke();
+
+    if (categoryLabels && categoryLabels.length > 0) {
+      const legendY = height - 8;
+      ctx.font = "10px sans-serif";
+      let cursorX = padLeft;
+      for (let index = 0; index < categoryLabels.length; index += 1) {
+        const label = categoryLabels[index];
+        const color =
+          legendMap.get(label.key) || analysisPaletteColor(sanitizeInt(label.index, index, 0, 10000));
+        ctx.fillStyle = color;
+        ctx.fillRect(cursorX, legendY - 7, 8, 8);
+        cursorX += 12;
+        ctx.fillStyle = "rgba(220,220,220,0.9)";
+        const text = String(label.label || label.key);
+        ctx.fillText(text, cursorX, legendY);
+        cursorX += ctx.measureText(text).width + 12;
+        if (cursorX > width - 90) {
+          break;
+        }
+      }
+    }
+  }
+
+  function drawAnalysisHeatmap(canvas, matrix, rowLabels, colLabels) {
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+    const width = canvas.width;
+    const height = canvas.height;
+    const padLeft = 64;
+    const padRight = 12;
+    const padTop = 14;
+    const padBottom = 30;
+    const plotWidth = Math.max(8, width - padLeft - padRight);
+    const plotHeight = Math.max(8, height - padTop - padBottom);
+
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = "#0b1220";
+    ctx.fillRect(0, 0, width, height);
+
+    if (!Array.isArray(matrix) || matrix.length === 0 || !Array.isArray(matrix[0])) {
+      ctx.fillStyle = "rgba(210,210,210,0.9)";
+      ctx.font = "11px sans-serif";
+      ctx.fillText("No heatmap data.", padLeft + 8, padTop + 18);
+      return;
+    }
+
+    const rows = matrix.length;
+    const cols = matrix[0].length;
+    let min = Number.POSITIVE_INFINITY;
+    let max = Number.NEGATIVE_INFINITY;
+    for (let r = 0; r < rows; r += 1) {
+      for (let c = 0; c < cols; c += 1) {
+        const value = Number(matrix[r][c]);
+        if (!Number.isFinite(value)) {
+          continue;
+        }
+        if (value < min) {
+          min = value;
+        }
+        if (value > max) {
+          max = value;
+        }
+      }
+    }
+    if (!Number.isFinite(min) || !Number.isFinite(max) || Math.abs(max - min) < 1e-12) {
+      min = 0;
+      max = 1;
+    }
+    const range = max - min;
+
+    const cellW = plotWidth / cols;
+    const cellH = plotHeight / rows;
+    for (let r = 0; r < rows; r += 1) {
+      for (let c = 0; c < cols; c += 1) {
+        const value = Number(matrix[r][c]);
+        const ratio = Number.isFinite(value) ? (value - min) / range : 0;
+        const hue = 210 - clamp(ratio, 0, 1) * 170;
+        const light = 24 + clamp(ratio, 0, 1) * 48;
+        ctx.fillStyle = "hsl(" + hue + " 78% " + light + "%)";
+        ctx.fillRect(padLeft + c * cellW, padTop + r * cellH, Math.ceil(cellW), Math.ceil(cellH));
+      }
+    }
+
+    ctx.strokeStyle = "rgba(170,210,235,0.72)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(padLeft + 0.5, padTop + 0.5, plotWidth, plotHeight);
+
+    ctx.fillStyle = "rgba(220,220,220,0.92)";
+    ctx.font = "10px sans-serif";
+    const maxRowLabels = Math.min(rows, rowLabels ? rowLabels.length : 0);
+    for (let r = 0; r < maxRowLabels; r += 1) {
+      const y = padTop + (r + 0.5) * cellH + 3;
+      ctx.fillText(String(rowLabels[r]), 6, y);
+    }
+
+    if (Array.isArray(colLabels) && colLabels.length > 0) {
+      const first = String(colLabels[0]);
+      const mid = String(colLabels[Math.floor((colLabels.length - 1) / 2)]);
+      const last = String(colLabels[colLabels.length - 1]);
+      ctx.fillText(first, padLeft, height - 9);
+      ctx.fillText(mid, padLeft + plotWidth * 0.45, height - 9);
+      const lastWidth = ctx.measureText(last).width;
+      ctx.fillText(last, padLeft + plotWidth - lastWidth, height - 9);
+    }
+  }
+
+  function drawAnalysisBarChart(canvas, labels, values, color) {
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+    const width = canvas.width;
+    const height = canvas.height;
+    const padLeft = 86;
+    const padRight = 12;
+    const padTop = 12;
+    const padBottom = 20;
+    const plotWidth = Math.max(8, width - padLeft - padRight);
+    const plotHeight = Math.max(8, height - padTop - padBottom);
+
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = "#0b1220";
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = "rgba(90,140,170,0.14)";
+    ctx.fillRect(padLeft, padTop, plotWidth, plotHeight);
+
+    if (!Array.isArray(values) || values.length === 0) {
+      ctx.fillStyle = "rgba(210,210,210,0.9)";
+      ctx.font = "11px sans-serif";
+      ctx.fillText("No bar-chart data.", padLeft + 8, padTop + 18);
+      return;
+    }
+
+    const maxValue = values.reduce(function (acc, value) {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) && numeric > acc ? numeric : acc;
+    }, 0);
+    const safeMax = maxValue > 1e-12 ? maxValue : 1;
+    const count = values.length;
+    const rowHeight = plotHeight / Math.max(1, count);
+
+    ctx.font = "10px sans-serif";
+    for (let index = 0; index < count; index += 1) {
+      const value = Math.max(0, Number(values[index]) || 0);
+      const ratio = value / safeMax;
+      const barWidth = ratio * plotWidth;
+      const y = padTop + index * rowHeight + 1;
+      const h = Math.max(1, rowHeight - 2);
+      ctx.fillStyle = color || analysisPaletteColor(index);
+      ctx.fillRect(padLeft, y, barWidth, h);
+
+      ctx.fillStyle = "rgba(220,220,220,0.9)";
+      const rawLabel = labels && labels[index] ? String(labels[index]) : "item-" + (index + 1);
+      const label = rawLabel.length > 16 ? rawLabel.slice(0, 16) + "..." : rawLabel;
+      ctx.fillText(label, 6, y + h * 0.72);
+      ctx.fillText(formatMetricNumber(value, 3), padLeft + barWidth + 4, y + h * 0.72);
+    }
+
+    ctx.strokeStyle = "rgba(170,210,235,0.72)";
+    ctx.strokeRect(padLeft + 0.5, padTop + 0.5, plotWidth, plotHeight);
+  }
+
+  function createAnalysisExamplesTable(headers, rows) {
+    const table = document.createElement("table");
+    table.className = "metrics-table analysis-examples-table";
+    const body = document.createElement("tbody");
+
+    const headerRow = document.createElement("tr");
+    for (let index = 0; index < headers.length; index += 1) {
+      const cell = document.createElement("td");
+      cell.textContent = headers[index];
+      cell.className = "analysis-examples-header";
+      headerRow.appendChild(cell);
+    }
+    body.appendChild(headerRow);
+
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+      const row = rows[rowIndex];
+      const tr = document.createElement("tr");
+      for (let col = 0; col < headers.length; col += 1) {
+        const cell = document.createElement("td");
+        cell.textContent = row[col] !== undefined && row[col] !== null ? String(row[col]) : "";
+        tr.appendChild(cell);
+      }
+      body.appendChild(tr);
+    }
+
+    table.appendChild(body);
+    return table;
+  }
+
+  function buildProjectionForVisualization(rows, maxRows, seed) {
+    if (!Array.isArray(rows) || rows.length < 2) {
+      return null;
+    }
+    const limit = Math.max(8, Math.min(rows.length, sanitizeInt(maxRows, 900, 8, 4000)));
+    let indices;
+    if (rows.length <= limit) {
+      indices = new Array(rows.length);
+      for (let index = 0; index < rows.length; index += 1) {
+        indices[index] = index;
+      }
+    } else {
+      const random = createSeededRandom(sanitizeInt(seed, 1009, -2147483648, 2147483647));
+      indices = sampleIndicesWithoutReplacement(rows.length, limit, random);
+    }
+
+    const sampledRows = new Array(indices.length);
+    for (let index = 0; index < indices.length; index += 1) {
+      sampledRows[index] = rows[indices[index]];
+    }
+
+    let pca;
+    try {
+      pca = computePcaProjection(sampledRows, 2);
+    } catch {
+      pca = null;
+    }
+    if (!pca || !Array.isArray(pca.projectionMatrix) || pca.projectionMatrix.length === 0) {
+      return null;
+    }
+
+    const points = new Array(pca.projectionMatrix.length);
+    for (let index = 0; index < pca.projectionMatrix.length; index += 1) {
+      const row = pca.projectionMatrix[index];
+      points[index] = {
+        x: Number(row[0] || 0),
+        y: Number(row[1] || 0)
+      };
+    }
+
+    return {
+      indices,
+      points,
+      explainedRatios: Array.isArray(pca.explainedRatios) ? pca.explainedRatios : []
+    };
+  }
+
+  function computeTopFeatureIndicesByClusterSeparation(rows, labels, k, maxFeatures) {
+    if (!Array.isArray(rows) || rows.length === 0 || !labels || rows.length !== labels.length) {
+      return [];
+    }
+    const featureCount = rows[0] ? rows[0].length : 0;
+    if (featureCount <= 0) {
+      return [];
+    }
+
+    const sums = new Array(k);
+    const counts = new Array(k).fill(0);
+    for (let cluster = 0; cluster < k; cluster += 1) {
+      sums[cluster] = new Float64Array(featureCount);
+    }
+    const global = new Float64Array(featureCount);
+
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+      const label = sanitizeInt(labels[rowIndex], 0, 0, Math.max(0, k - 1));
+      counts[label] += 1;
+      const row = rows[rowIndex];
+      for (let feature = 0; feature < featureCount; feature += 1) {
+        const value = Number(row[feature] || 0);
+        sums[label][feature] += value;
+        global[feature] += value;
+      }
+    }
+
+    for (let feature = 0; feature < featureCount; feature += 1) {
+      global[feature] /= Math.max(1, rows.length);
+    }
+
+    const scores = new Array(featureCount);
+    for (let feature = 0; feature < featureCount; feature += 1) {
+      let between = 0;
+      for (let cluster = 0; cluster < k; cluster += 1) {
+        if (counts[cluster] <= 0) {
+          continue;
+        }
+        const mean = sums[cluster][feature] / counts[cluster];
+        const delta = mean - global[feature];
+        between += counts[cluster] * delta * delta;
+      }
+      scores[feature] = { feature, score: between / Math.max(1, rows.length) };
+    }
+    scores.sort(function (left, right) {
+      return right.score - left.score;
+    });
+
+    return scores
+      .slice(0, Math.max(1, Math.min(featureCount, sanitizeInt(maxFeatures, 12, 1, 48))))
+      .map(function (entry) {
+        return entry.feature;
+      });
+  }
+
+  function buildClusterFeatureMeanMatrix(rows, labels, k, featureIndices) {
+    const matrix = new Array(k);
+    const counts = new Array(k).fill(0);
+    for (let cluster = 0; cluster < k; cluster += 1) {
+      matrix[cluster] = new Float64Array(featureIndices.length);
+    }
+
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+      const cluster = sanitizeInt(labels[rowIndex], 0, 0, Math.max(0, k - 1));
+      counts[cluster] += 1;
+      const row = rows[rowIndex];
+      for (let col = 0; col < featureIndices.length; col += 1) {
+        const featureIndex = featureIndices[col];
+        matrix[cluster][col] += Number(row[featureIndex] || 0);
+      }
+    }
+
+    const output = new Array(k);
+    for (let cluster = 0; cluster < k; cluster += 1) {
+      output[cluster] = new Array(featureIndices.length).fill(0);
+      const scale = 1 / Math.max(1, counts[cluster]);
+      for (let col = 0; col < featureIndices.length; col += 1) {
+        output[cluster][col] = matrix[cluster][col] * scale;
+      }
+    }
+    return output;
+  }
+
+  function formatBinaryClassLabel(value) {
+    if (value === 1 || value === "1" || value === true || value === "active") {
+      return "active";
+    }
+    return "inactive";
+  }
+
+  function computeRClusterExampleRows(rows, labels, centroids, rowTimesSeconds, classLabels) {
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return { medoids: [], borderlines: [] };
+    }
+    const perCluster = new Map();
+    const globalMargins = [];
+
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+      const cluster = sanitizeInt(labels[rowIndex], 0, 0, Math.max(0, centroids.length - 1));
+      let nearest = Number.POSITIVE_INFINITY;
+      let second = Number.POSITIVE_INFINITY;
+      for (let c = 0; c < centroids.length; c += 1) {
+        const distance = squaredDistanceForFeatureSet(rows[rowIndex], centroids[c], null);
+        if (distance < nearest) {
+          second = nearest;
+          nearest = distance;
+        } else if (distance < second) {
+          second = distance;
+        }
+      }
+      const margin = Math.sqrt(Math.max(0, second)) - Math.sqrt(Math.max(0, nearest));
+      const entry = {
+        cluster,
+        rowIndex,
+        timeSec:
+          Array.isArray(rowTimesSeconds) && Number.isFinite(Number(rowTimesSeconds[rowIndex]))
+            ? Number(rowTimesSeconds[rowIndex])
+            : Number.NaN,
+        classLabel:
+          Array.isArray(classLabels) && rowIndex < classLabels.length
+            ? String(classLabels[rowIndex])
+            : "unknown",
+        distance: Math.sqrt(Math.max(0, nearest)),
+        margin
+      };
+      if (!perCluster.has(cluster)) {
+        perCluster.set(cluster, []);
+      }
+      perCluster.get(cluster).push(entry);
+      globalMargins.push(entry);
+    }
+
+    const medoids = [];
+    perCluster.forEach(function (entries, cluster) {
+      entries.sort(function (left, right) {
+        return left.distance - right.distance;
+      });
+      for (let index = 0; index < Math.min(3, entries.length); index += 1) {
+        medoids.push(entries[index]);
+      }
+      if (entries.length > 0) {
+        const borderline = entries.reduce(function (best, current) {
+          return current.margin < best.margin ? current : best;
+        }, entries[0]);
+        borderline.isBorderline = true;
+      }
+    });
+
+    globalMargins.sort(function (left, right) {
+      return left.margin - right.margin;
+    });
+    const borderlines = globalMargins.slice(0, Math.min(8, globalMargins.length));
+    return { medoids, borderlines };
+  }
+
   function getRClusterParamsFromInputs() {
     const params = {
       k: sanitizeInt(rclusterK.value, 2, 2, 64),
@@ -3108,9 +3714,11 @@
     const rowStride = Math.max(1, Math.ceil(frameCount / RCLUSTER_MAX_ROWS));
     const sampledRows = [];
     const sampledLabels = [];
+    const sampledTimesSeconds = [];
     for (let rowIndex = 0; rowIndex < frameCount; rowIndex += rowStride) {
       sampledRows.push(featureRows[rowIndex]);
       sampledLabels.push(classLabels.labels[rowIndex]);
+      sampledTimesSeconds.push(Number(frameTimesSeconds[rowIndex] || 0));
     }
     if (sampledRows.length < 2) {
       throw new Error("Not enough frames after sampling for clustering.");
@@ -3141,6 +3749,7 @@
     return {
       rows: processedRows,
       classLabels: sampledLabels,
+      rowTimesSeconds: sampledTimesSeconds,
       featureColumns: featureHeader,
       runContext: {
         representationMode,
@@ -3765,6 +4374,50 @@
     }
 
     const purity = computeClusterPurityLocal(baseline.labels, dataset.classLabels, params.k);
+    const projection = buildProjectionForVisualization(normalizedRows, 900, params.seed + 313);
+    const topFeatureIndices = computeTopFeatureIndicesByClusterSeparation(
+      normalizedRows,
+      baseline.labels,
+      params.k,
+      12
+    );
+    const featureMeans = buildClusterFeatureMeanMatrix(
+      normalizedRows,
+      baseline.labels,
+      params.k,
+      topFeatureIndices
+    );
+    const examples = computeRClusterExampleRows(
+      normalizedRows,
+      baseline.labels,
+      baseline.centroids,
+      Array.isArray(dataset.rowTimesSeconds) ? dataset.rowTimesSeconds : [],
+      dataset.classLabels
+    );
+    const mapPoints = projection
+      ? projection.points.map(function (point, index) {
+          const sourceIndex = projection.indices[index];
+          const cluster = sanitizeInt(baseline.labels[sourceIndex], 0, 0, Math.max(0, params.k - 1));
+          const classLabel =
+            Array.isArray(dataset.classLabels) && sourceIndex < dataset.classLabels.length
+              ? dataset.classLabels[sourceIndex]
+              : "unknown";
+          const timeSec =
+            Array.isArray(dataset.rowTimesSeconds) &&
+            Number.isFinite(Number(dataset.rowTimesSeconds[sourceIndex]))
+              ? Number(dataset.rowTimesSeconds[sourceIndex])
+              : Number.NaN;
+          return {
+            x: point.x,
+            y: point.y,
+            category: "cluster_" + cluster,
+            categoryIndex: cluster,
+            classLabel,
+            timeSec,
+            rowIndex: sourceIndex
+          };
+        })
+      : [];
     return {
       command: "r-cluster",
       schema_version: "0.2.0-js",
@@ -3795,6 +4448,31 @@
       classwise: {
         labels_source: "activation_overlay",
         purity
+      },
+      visualization: {
+        map: {
+          points: mapPoints,
+          explained_ratios:
+            projection && Array.isArray(projection.explainedRatios)
+              ? projection.explainedRatios.slice(0, 2)
+              : []
+        },
+        summary: {
+          cluster_sizes: sizes.map(function (size, cluster) {
+            return { cluster, size };
+          })
+        },
+        why: {
+          feature_indices: topFeatureIndices,
+          feature_labels: topFeatureIndices.map(function (featureIndex) {
+            return dataset.featureColumns[featureIndex] || "f" + featureIndex;
+          }),
+          cluster_feature_means: featureMeans
+        },
+        examples: {
+          medoids: examples.medoids,
+          borderlines: examples.borderlines
+        }
       }
     };
   }
@@ -3947,6 +4625,169 @@
         ])
       );
     }
+
+    renderRClusterVisualizations(result);
+  }
+
+  function renderRClusterVisualizations(result) {
+    const visualization = result ? asRecord(result.visualization) : null;
+    if (!visualization) {
+      return;
+    }
+
+    const map = asRecord(visualization.map);
+    const summary = asRecord(visualization.summary);
+    const why = asRecord(visualization.why);
+    const examples = asRecord(visualization.examples);
+
+    const mapPoints = map && Array.isArray(map.points) ? map.points : [];
+    if (mapPoints.length > 0) {
+      const explained = Array.isArray(map.explained_ratios) ? map.explained_ratios : [];
+      const card = createAnalysisVizCard(
+        "Map",
+        "PCA(2D) of clustering feature space" +
+          (explained.length > 0
+            ? " | explained=" +
+              formatMetricPercent(Number(explained[0] || 0)) +
+              ", " +
+              formatMetricPercent(Number(explained[1] || 0))
+            : "")
+      );
+      const canvas = createAnalysisCanvas(760, 280);
+      const clusterKeys = new Set();
+      for (let index = 0; index < mapPoints.length; index += 1) {
+        const point = asRecord(mapPoints[index]);
+        if (!point) {
+          continue;
+        }
+        clusterKeys.add(String(point.category || "cluster_0"));
+      }
+      const legend = Array.from(clusterKeys)
+        .sort()
+        .map(function (key, index) {
+          return { key, label: key.replace("cluster_", "cluster "), index };
+        });
+      drawAnalysisScatter(
+        canvas,
+        mapPoints.map(function (entry) {
+          const point = asRecord(entry);
+          return {
+            x: point ? Number(point.x || 0) : 0,
+            y: point ? Number(point.y || 0) : 0,
+            category: point ? String(point.category || "cluster_0") : "cluster_0",
+            categoryIndex: point ? sanitizeInt(String(point.category || "").replace("cluster_", ""), 0, 0, 1000) : 0
+          };
+        }),
+        legend
+      );
+      card.appendChild(canvas);
+      rclusterResults.appendChild(card);
+    }
+
+    const clusterSizes = summary && Array.isArray(summary.cluster_sizes) ? summary.cluster_sizes : [];
+    if (clusterSizes.length > 0) {
+      const labels = [];
+      const values = [];
+      for (let index = 0; index < clusterSizes.length; index += 1) {
+        const item = asRecord(clusterSizes[index]);
+        if (!item) {
+          continue;
+        }
+        labels.push("cluster " + sanitizeInt(item.cluster, index, 0, 1000));
+        values.push(sanitizeInt(item.size, 0, 0, 1000000000));
+      }
+      const summaryCard = createAnalysisVizCard("Summary", "Cluster size distribution");
+      const canvas = createAnalysisCanvas(760, Math.max(180, labels.length * 24 + 40));
+      drawAnalysisBarChart(canvas, labels, values, "#38bdf8");
+      summaryCard.appendChild(canvas);
+      rclusterResults.appendChild(summaryCard);
+    }
+
+    const featureLabels = why && Array.isArray(why.feature_labels) ? why.feature_labels : [];
+    const featureMeans = why && Array.isArray(why.cluster_feature_means) ? why.cluster_feature_means : [];
+    if (featureLabels.length > 0 && featureMeans.length > 0) {
+      const whyCard = createAnalysisVizCard(
+        "Why",
+        "Cluster x feature fingerprint heatmap (top separating features)"
+      );
+      const rowLabels = featureMeans.map(function (_, rowIndex) {
+        return "c" + rowIndex;
+      });
+      const colLabels = featureLabels.map(function (label) {
+        return String(label);
+      });
+      const heatmap = createAnalysisCanvas(760, Math.max(220, featureMeans.length * 28 + 56));
+      drawAnalysisHeatmap(heatmap, featureMeans, rowLabels, colLabels);
+      whyCard.appendChild(heatmap);
+      rclusterResults.appendChild(whyCard);
+    }
+
+    const medoids = examples && Array.isArray(examples.medoids) ? examples.medoids : [];
+    const borderlines = examples && Array.isArray(examples.borderlines) ? examples.borderlines : [];
+    if (medoids.length > 0 || borderlines.length > 0) {
+      const examplesCard = createAnalysisVizCard(
+        "Examples",
+        "Representatives (medoids) and borderline frames"
+      );
+      const rows = [];
+      for (let index = 0; index < Math.min(8, medoids.length); index += 1) {
+        const item = asRecord(medoids[index]);
+        if (!item) {
+          continue;
+        }
+        rows.push([
+          "medoid",
+          sanitizeInt(item.cluster, 0, 0, 1000),
+          sanitizeInt(item.rowIndex, 0, 0, 1000000000),
+          formatMetricNumber(Number(item.timeSec), 3),
+          String(item.classLabel || ""),
+          formatMetricNumber(Number(item.distance), 4)
+        ]);
+      }
+      for (let index = 0; index < Math.min(6, borderlines.length); index += 1) {
+        const item = asRecord(borderlines[index]);
+        if (!item) {
+          continue;
+        }
+        rows.push([
+          "borderline",
+          sanitizeInt(item.cluster, 0, 0, 1000),
+          sanitizeInt(item.rowIndex, 0, 0, 1000000000),
+          formatMetricNumber(Number(item.timeSec), 3),
+          String(item.classLabel || ""),
+          formatMetricNumber(Number(item.margin), 4)
+        ]);
+      }
+      if (rows.length > 0) {
+        examplesCard.appendChild(
+          createAnalysisExamplesTable(
+            ["type", "cluster", "row", "time(s)", "class", "score"],
+            rows
+          )
+        );
+        rclusterResults.appendChild(examplesCard);
+      }
+    }
+  }
+
+  function updateAnalysisToolPanelVisibility() {
+    const selectedTool = sanitizeAnalysisTool(
+      analysisToolSelect.value || (state.analysis && state.analysis.tool),
+      "random_forest"
+    );
+    activeAnalysisTool = selectedTool;
+    state.analysis.tool = selectedTool;
+    analysisToolSelect.value = selectedTool;
+    analysisPanelRcluster.classList.toggle("is-active", selectedTool === "rcluster");
+    analysisPanelRandomForest.classList.toggle("is-active", selectedTool === "random_forest");
+    analysisPanelSpf.classList.toggle("is-active", selectedTool === "spf");
+  }
+
+  function updateAnalysisPanelsAndControls() {
+    updateAnalysisToolPanelVisibility();
+    updateRClusterControls();
+    updateRandomForestControls();
+    updateSpfControls();
   }
 
   function updateRClusterControls() {
@@ -3969,6 +4810,1214 @@
 
     rclusterRun.disabled = rClusterRunning || !hasAudio || !hasOverlay;
     rclusterRepresentation.disabled = rClusterRunning;
+  }
+
+  function getRandomForestParamsFromInputs() {
+    return {
+      source:
+        typeof rfSource.value === "string" && (rfSource.value === "mel" || rfSource.value === "stft")
+          ? rfSource.value
+          : "mel",
+      treeCount: sanitizeInt(rfTreeCount.value, 96, 8, 512),
+      maxDepth: sanitizeInt(rfMaxDepth.value, 8, 1, 24),
+      minLeaf: sanitizeInt(rfMinLeaf.value, 4, 1, 128),
+      featureRatio: sanitizeFloat(rfFeatureRatio.value, 0.35, 0.05, 1),
+      maxFrames: sanitizeInt(rfMaxFrames.value, 2200, 128, RANDOM_FOREST_MAX_ROWS),
+      topFeatures: sanitizeInt(rfTopFeatures.value, 20, 5, 200)
+    };
+  }
+
+  function syncRandomForestParamsFromInputs() {
+    const params = getRandomForestParamsFromInputs();
+    randomForestSourceMode = params.source;
+    rfSource.value = params.source;
+    rfTreeCount.value = String(params.treeCount);
+    rfMaxDepth.value = String(params.maxDepth);
+    rfMinLeaf.value = String(params.minLeaf);
+    rfFeatureRatio.value = formatMetricNumber(params.featureRatio, 2);
+    rfMaxFrames.value = String(params.maxFrames);
+    rfTopFeatures.value = String(params.topFeatures);
+    return params;
+  }
+
+  function setRandomForestStatus(message) {
+    rfStatus.textContent = message;
+  }
+
+  function setRandomForestProgress(value) {
+    const numeric = Number(value);
+    const clampedValue = Number.isFinite(numeric) ? clamp(numeric, 0, 100) : 0;
+    rfProgress.value = clampedValue;
+    rfProgress.classList.toggle("is-active", clampedValue > 0 && clampedValue < 100);
+  }
+
+  function buildRandomForestDataset(params) {
+    const analysisAudio = getSingleChannelAnalysisAudio();
+    if (!analysisAudio || !analysisAudio.samples || analysisAudio.samples.length === 0) {
+      throw new Error("Load a primary audio clip first.");
+    }
+    if (!state.overlay.enabled || !overlayParsed || !Array.isArray(overlayParsed.intervals)) {
+      throw new Error("Enable Activation Overlay and load overlay CSV labels first.");
+    }
+
+    const featureSource = buildShortTimeFeatureRowsForMode(analysisAudio, params.source);
+    const featureRows = featureSource.featureRows;
+    const frameTimesSeconds = featureSource.frameTimesSeconds;
+    const frameCount = Math.min(featureRows.length, frameTimesSeconds.length);
+    if (frameCount < 16) {
+      throw new Error("Not enough short-time frames for random forest diagnostics.");
+    }
+
+    const classSummary = buildRClusterClassLabels(
+      frameTimesSeconds.slice(0, frameCount),
+      overlayParsed.intervals
+    );
+    if (!classSummary) {
+      throw new Error("Unable to derive active/inactive frame labels from overlay.");
+    }
+    if (
+      classSummary.activeCount < RANDOM_FOREST_MIN_CLASS_FRAMES ||
+      classSummary.inactiveCount < RANDOM_FOREST_MIN_CLASS_FRAMES
+    ) {
+      throw new Error(
+        "Need at least " +
+          RANDOM_FOREST_MIN_CLASS_FRAMES +
+          " active and inactive frames. active=" +
+          classSummary.activeCount +
+          ", inactive=" +
+          classSummary.inactiveCount +
+          "."
+      );
+    }
+
+    const rowStride = Math.max(1, Math.ceil(frameCount / params.maxFrames));
+    const rows = [];
+    const labels = [];
+    const rowTimesSeconds = [];
+    for (let frameIndex = 0; frameIndex < frameCount; frameIndex += rowStride) {
+      rows.push(featureRows[frameIndex]);
+      labels.push(classSummary.labels[frameIndex] === "active" ? 1 : 0);
+      rowTimesSeconds.push(Number(frameTimesSeconds[frameIndex] || 0));
+    }
+    if (rows.length < 16) {
+      throw new Error("Not enough frames after sampling for random forest.");
+    }
+
+    const sourceFeatureCount = rows[0] ? rows[0].length : 0;
+    const outputFeatureCount = Math.min(
+      RANDOM_FOREST_MAX_COLUMNS,
+      Math.max(1, sourceFeatureCount)
+    );
+    const processedRows = new Array(rows.length);
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+      const sourceRow = rows[rowIndex];
+      const values =
+        sourceRow.length > outputFeatureCount
+          ? resampleVectorToLength(sourceRow, outputFeatureCount)
+          : sourceRow;
+      const processed = new Float32Array(outputFeatureCount);
+      for (let col = 0; col < outputFeatureCount; col += 1) {
+        const numeric = Number(values[col] || 0);
+        processed[col] = Number.isFinite(numeric) ? numeric : 0;
+      }
+      processedRows[rowIndex] = processed;
+    }
+
+    let activeFrames = 0;
+    for (let index = 0; index < labels.length; index += 1) {
+      activeFrames += labels[index] ? 1 : 0;
+    }
+    const inactiveFrames = labels.length - activeFrames;
+    if (
+      activeFrames < RANDOM_FOREST_MIN_CLASS_FRAMES ||
+      inactiveFrames < RANDOM_FOREST_MIN_CLASS_FRAMES
+    ) {
+      throw new Error(
+        "Insufficient class balance after sampling. active=" +
+          activeFrames +
+          ", inactive=" +
+          inactiveFrames +
+          "."
+      );
+    }
+
+    const featureColumns = new Array(outputFeatureCount);
+    for (let featureIndex = 0; featureIndex < outputFeatureCount; featureIndex += 1) {
+      featureColumns[featureIndex] = params.source + "_f" + featureIndex;
+    }
+
+    return {
+      rows: processedRows,
+      labels,
+      rowTimesSeconds,
+      featureColumns,
+      runContext: {
+        source: params.source,
+        sourceDescription: featureSource.sourceDescription,
+        frameCountOriginal: frameCount,
+        frameCountUsed: processedRows.length,
+        featureCountOriginal: sourceFeatureCount,
+        featureCountUsed: outputFeatureCount,
+        rowStride,
+        activeFrames,
+        inactiveFrames,
+        overlayMode: overlayParsed.mode,
+        analysisSource: getSingleChannelAnalysisLabel(),
+        backend: "javascript"
+      }
+    };
+  }
+
+  function computeBinaryGiniForCounts(positive, negative) {
+    const total = positive + negative;
+    if (total <= 0) {
+      return 0;
+    }
+    const p = positive / total;
+    const q = negative / total;
+    return 1 - (p * p + q * q);
+  }
+
+  function chooseRandomForestSplit(rows, labels, indices, featureIndices, minLeaf) {
+    if (!Array.isArray(indices) || indices.length === 0) {
+      return null;
+    }
+
+    let parentPositive = 0;
+    for (let index = 0; index < indices.length; index += 1) {
+      parentPositive += labels[indices[index]] ? 1 : 0;
+    }
+    const parentNegative = indices.length - parentPositive;
+    if (parentPositive === 0 || parentNegative === 0) {
+      return null;
+    }
+
+    const parentGini = computeBinaryGiniForCounts(parentPositive, parentNegative);
+    let bestGain = 0;
+    let bestFeatureIndex = -1;
+    let bestThreshold = 0;
+
+    const thresholdTrials = Math.max(3, Math.min(7, Math.floor(Math.sqrt(indices.length) / 3)));
+    for (let featureCursor = 0; featureCursor < featureIndices.length; featureCursor += 1) {
+      const featureIndex = featureIndices[featureCursor];
+      let minValue = Number.POSITIVE_INFINITY;
+      let maxValue = Number.NEGATIVE_INFINITY;
+      for (let rowCursor = 0; rowCursor < indices.length; rowCursor += 1) {
+        const value = Number(rows[indices[rowCursor]][featureIndex] || 0);
+        if (value < minValue) {
+          minValue = value;
+        }
+        if (value > maxValue) {
+          maxValue = value;
+        }
+      }
+      if (!Number.isFinite(minValue) || !Number.isFinite(maxValue) || maxValue - minValue <= 1e-12) {
+        continue;
+      }
+
+      for (let trial = 1; trial <= thresholdTrials; trial += 1) {
+        const threshold = minValue + ((maxValue - minValue) * trial) / (thresholdTrials + 1);
+        let leftPositive = 0;
+        let leftNegative = 0;
+        let rightPositive = 0;
+        let rightNegative = 0;
+
+        for (let rowCursor = 0; rowCursor < indices.length; rowCursor += 1) {
+          const rowIndex = indices[rowCursor];
+          const goesLeft = Number(rows[rowIndex][featureIndex] || 0) <= threshold;
+          if (goesLeft) {
+            if (labels[rowIndex]) {
+              leftPositive += 1;
+            } else {
+              leftNegative += 1;
+            }
+          } else if (labels[rowIndex]) {
+            rightPositive += 1;
+          } else {
+            rightNegative += 1;
+          }
+        }
+
+        const leftCount = leftPositive + leftNegative;
+        const rightCount = rightPositive + rightNegative;
+        if (leftCount < minLeaf || rightCount < minLeaf) {
+          continue;
+        }
+
+        const weightedGini =
+          (leftCount / indices.length) * computeBinaryGiniForCounts(leftPositive, leftNegative) +
+          (rightCount / indices.length) * computeBinaryGiniForCounts(rightPositive, rightNegative);
+        const gain = parentGini - weightedGini;
+        if (gain > bestGain + 1e-12) {
+          bestGain = gain;
+          bestFeatureIndex = featureIndex;
+          bestThreshold = threshold;
+        }
+      }
+    }
+
+    if (bestFeatureIndex < 0) {
+      return null;
+    }
+
+    const leftIndices = [];
+    const rightIndices = [];
+    for (let index = 0; index < indices.length; index += 1) {
+      const rowIndex = indices[index];
+      if (Number(rows[rowIndex][bestFeatureIndex] || 0) <= bestThreshold) {
+        leftIndices.push(rowIndex);
+      } else {
+        rightIndices.push(rowIndex);
+      }
+    }
+
+    if (leftIndices.length < minLeaf || rightIndices.length < minLeaf) {
+      return null;
+    }
+
+    return {
+      featureIndex: bestFeatureIndex,
+      threshold: bestThreshold,
+      gain: bestGain,
+      leftIndices,
+      rightIndices
+    };
+  }
+
+  function trainRandomForestTree(rows, labels, bootstrapIndices, params, random, featureImportance) {
+    const featureCount = rows[0] ? rows[0].length : 0;
+    const root = {};
+    const stack = [{ node: root, indices: bootstrapIndices, depth: 0 }];
+
+    while (stack.length > 0) {
+      const workItem = stack.pop();
+      const node = workItem.node;
+      const indices = workItem.indices;
+      const depth = workItem.depth;
+
+      if (!Array.isArray(indices) || indices.length === 0) {
+        node.leafProbability = 0.5;
+        node.sampleCount = 0;
+        continue;
+      }
+
+      let positive = 0;
+      for (let index = 0; index < indices.length; index += 1) {
+        positive += labels[indices[index]] ? 1 : 0;
+      }
+      const negative = indices.length - positive;
+      const leafProbability = positive / Math.max(1, indices.length);
+
+      const shouldStop =
+        depth >= params.maxDepth ||
+        indices.length <= params.minLeaf * 2 ||
+        positive === 0 ||
+        negative === 0 ||
+        featureCount <= 0;
+      if (shouldStop) {
+        node.leafProbability = leafProbability;
+        node.sampleCount = indices.length;
+        node.positiveCount = positive;
+        continue;
+      }
+
+      const mtry = Math.max(1, Math.min(featureCount, Math.round(featureCount * params.featureRatio)));
+      const candidateFeatures = sampleIndicesWithoutReplacement(featureCount, mtry, random);
+      const split = chooseRandomForestSplit(
+        rows,
+        labels,
+        indices,
+        candidateFeatures,
+        params.minLeaf
+      );
+
+      if (!split) {
+        node.leafProbability = leafProbability;
+        node.sampleCount = indices.length;
+        node.positiveCount = positive;
+        continue;
+      }
+
+      node.featureIndex = split.featureIndex;
+      node.threshold = split.threshold;
+      node.sampleCount = indices.length;
+      node.positiveCount = positive;
+      node.left = {};
+      node.right = {};
+      featureImportance[split.featureIndex] += split.gain * indices.length;
+
+      stack.push({ node: node.right, indices: split.rightIndices, depth: depth + 1 });
+      stack.push({ node: node.left, indices: split.leftIndices, depth: depth + 1 });
+    }
+
+    return root;
+  }
+
+  function predictRandomForestTreeProbability(
+    tree,
+    row,
+    overrideFeatureIndex,
+    overrideFeatureValue
+  ) {
+    let node = tree;
+    while (node && typeof node === "object" && !Number.isFinite(node.leafProbability)) {
+      const featureIndex = sanitizeInt(node.featureIndex, -1, -1, 1000000);
+      const threshold = Number(node.threshold);
+      if (featureIndex < 0 || !Number.isFinite(threshold)) {
+        break;
+      }
+      const value =
+        Number.isFinite(overrideFeatureIndex) && featureIndex === overrideFeatureIndex
+          ? Number(overrideFeatureValue || 0)
+          : Number(row[featureIndex] || 0);
+      node = value <= threshold ? node.left : node.right;
+    }
+
+    if (node && Number.isFinite(node.leafProbability)) {
+      return clamp(Number(node.leafProbability), 0, 1);
+    }
+    return 0.5;
+  }
+
+  function predictRandomForestProbability(
+    forestTrees,
+    row,
+    overrideFeatureIndex,
+    overrideFeatureValue
+  ) {
+    if (!Array.isArray(forestTrees) || forestTrees.length === 0) {
+      return 0.5;
+    }
+    let sum = 0;
+    let count = 0;
+    for (let index = 0; index < forestTrees.length; index += 1) {
+      const tree = forestTrees[index];
+      if (!tree || typeof tree !== "object") {
+        continue;
+      }
+      sum += predictRandomForestTreeProbability(
+        tree,
+        row,
+        overrideFeatureIndex,
+        overrideFeatureValue
+      );
+      count += 1;
+    }
+    return count > 0 ? sum / count : 0.5;
+  }
+
+  function computeRandomForestAccuracyForIndices(
+    rows,
+    labels,
+    forestTrees,
+    indices,
+    overrideFeatureIndex,
+    replacementValues
+  ) {
+    if (!Array.isArray(indices) || indices.length === 0) {
+      return 0;
+    }
+    let correct = 0;
+    for (let sampleIndex = 0; sampleIndex < indices.length; sampleIndex += 1) {
+      const rowIndex = indices[sampleIndex];
+      const row = rows[rowIndex];
+      const overrideValue =
+        Number.isFinite(overrideFeatureIndex) && Array.isArray(replacementValues)
+          ? replacementValues[sampleIndex]
+          : undefined;
+      const probability = predictRandomForestProbability(
+        forestTrees,
+        row,
+        overrideFeatureIndex,
+        overrideValue
+      );
+      const prediction = probability >= 0.5 ? 1 : 0;
+      if (prediction === (labels[rowIndex] ? 1 : 0)) {
+        correct += 1;
+      }
+    }
+    return correct / Math.max(1, indices.length);
+  }
+
+  function buildRandomForestPdp(
+    rows,
+    labels,
+    forestTrees,
+    featureIndex,
+    evalIndices,
+    iceCount,
+    gridPoints
+  ) {
+    if (!Array.isArray(rows) || rows.length === 0 || !Array.isArray(evalIndices)) {
+      return null;
+    }
+    const values = evalIndices.map(function (rowIndex) {
+      return Number(rows[rowIndex][featureIndex] || 0);
+    });
+    const sorted = values.slice().sort(function (a, b) {
+      return a - b;
+    });
+    if (sorted.length === 0) {
+      return null;
+    }
+
+    const grid = [];
+    const steps = Math.max(5, sanitizeInt(gridPoints, 12, 5, 32));
+    for (let step = 0; step < steps; step += 1) {
+      const q = steps <= 1 ? 0 : step / (steps - 1);
+      grid.push(quantileSorted(sorted, q));
+    }
+
+    const meanProbabilities = new Array(grid.length);
+    for (let gridIndex = 0; gridIndex < grid.length; gridIndex += 1) {
+      const fixedValue = grid[gridIndex];
+      let sum = 0;
+      for (let sampleIndex = 0; sampleIndex < evalIndices.length; sampleIndex += 1) {
+        const rowIndex = evalIndices[sampleIndex];
+        sum += predictRandomForestProbability(forestTrees, rows[rowIndex], featureIndex, fixedValue);
+      }
+      meanProbabilities[gridIndex] = sum / Math.max(1, evalIndices.length);
+    }
+
+    const random = createSeededRandom(5011 + featureIndex * 31 + evalIndices.length);
+    const iceSampleCount = Math.max(1, Math.min(evalIndices.length, sanitizeInt(iceCount, 8, 1, 24)));
+    const iceIndices =
+      evalIndices.length <= iceSampleCount
+        ? evalIndices.slice()
+        : sampleIndicesWithoutReplacement(evalIndices.length, iceSampleCount, random).map(
+            function (idx) {
+              return evalIndices[idx];
+            }
+          );
+    const ice = iceIndices.map(function (rowIndex) {
+      const valuesForRow = new Array(grid.length);
+      for (let gridIndex = 0; gridIndex < grid.length; gridIndex += 1) {
+        valuesForRow[gridIndex] = predictRandomForestProbability(
+          forestTrees,
+          rows[rowIndex],
+          featureIndex,
+          grid[gridIndex]
+        );
+      }
+      return { rowIndex, values: valuesForRow, classLabel: labels[rowIndex] ? "active" : "inactive" };
+    });
+
+    return {
+      featureIndex,
+      grid,
+      meanProbabilities,
+      ice
+    };
+  }
+
+  function computeBinaryMetricsFromProbabilities(labels, probabilitySums, voteCounts) {
+    let evaluated = 0;
+    let correct = 0;
+    let tp = 0;
+    let tn = 0;
+    let fp = 0;
+    let fn = 0;
+
+    for (let index = 0; index < labels.length; index += 1) {
+      const count = voteCounts[index];
+      if (!count) {
+        continue;
+      }
+      evaluated += 1;
+      const probability = probabilitySums[index] / count;
+      const prediction = probability >= 0.5 ? 1 : 0;
+      const target = labels[index] ? 1 : 0;
+      if (prediction === target) {
+        correct += 1;
+      }
+      if (prediction === 1 && target === 1) {
+        tp += 1;
+      } else if (prediction === 0 && target === 0) {
+        tn += 1;
+      } else if (prediction === 1 && target === 0) {
+        fp += 1;
+      } else {
+        fn += 1;
+      }
+    }
+
+    const accuracy = evaluated > 0 ? correct / evaluated : 0;
+    const precision = tp + fp > 0 ? tp / (tp + fp) : 0;
+    const recall = tp + fn > 0 ? tp / (tp + fn) : 0;
+    const f1 = precision + recall > 0 ? (2 * precision * recall) / (precision + recall) : 0;
+
+    return {
+      evaluated,
+      accuracy,
+      precision,
+      recall,
+      f1,
+      coverage: evaluated / Math.max(1, labels.length),
+      confusion: { tp, tn, fp, fn }
+    };
+  }
+
+  async function runRandomForestInBrowserLocal(dataset, params) {
+    if (!dataset || !Array.isArray(dataset.rows) || dataset.rows.length < 4) {
+      throw new Error("Not enough rows to run random forest.");
+    }
+
+    setRandomForestProgress(16);
+    await waitForUiFrame();
+    const normalizedRows = zscoreRowsByColumn(dataset.rows);
+    const rowCount = normalizedRows.length;
+    const featureCount = normalizedRows[0] ? normalizedRows[0].length : 0;
+    if (featureCount <= 0) {
+      throw new Error("No feature columns available for random forest.");
+    }
+
+    const featureImportance = new Float64Array(featureCount);
+    const inSampleProbabilitySums = new Float64Array(rowCount);
+    const inSampleVoteCounts = new Uint16Array(rowCount);
+    const oobProbabilitySums = new Float64Array(rowCount);
+    const oobVoteCounts = new Uint16Array(rowCount);
+
+    const seed =
+      123457 +
+      params.treeCount * 17 +
+      params.maxDepth * 31 +
+      params.minLeaf * 101 +
+      Math.round(params.featureRatio * 1000);
+    const random = createSeededRandom(seed);
+    let fittedTrees = 0;
+    const forestTrees = [];
+
+    for (let treeIndex = 0; treeIndex < params.treeCount; treeIndex += 1) {
+      const bootstrapIndices = new Array(rowCount);
+      const inBag = new Uint8Array(rowCount);
+      for (let sampleIndex = 0; sampleIndex < rowCount; sampleIndex += 1) {
+        const picked = Math.floor(random() * rowCount);
+        bootstrapIndices[sampleIndex] = picked;
+        inBag[picked] = 1;
+      }
+
+      const tree = trainRandomForestTree(
+        normalizedRows,
+        dataset.labels,
+        bootstrapIndices,
+        params,
+        random,
+        featureImportance
+      );
+      fittedTrees += 1;
+      forestTrees.push(tree);
+
+      for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+        const probability = predictRandomForestTreeProbability(tree, normalizedRows[rowIndex]);
+        inSampleProbabilitySums[rowIndex] += probability;
+        inSampleVoteCounts[rowIndex] += 1;
+        if (!inBag[rowIndex]) {
+          oobProbabilitySums[rowIndex] += probability;
+          oobVoteCounts[rowIndex] += 1;
+        }
+      }
+
+      const progressRatio = (treeIndex + 1) / Math.max(1, params.treeCount);
+      setRandomForestProgress(20 + progressRatio * 72);
+      if ((treeIndex + 1) % 4 === 0 || treeIndex + 1 === params.treeCount) {
+        await waitForUiFrame();
+      }
+    }
+
+    setRandomForestProgress(96);
+    await waitForUiFrame();
+
+    const inSampleMetrics = computeBinaryMetricsFromProbabilities(
+      dataset.labels,
+      inSampleProbabilitySums,
+      inSampleVoteCounts
+    );
+    const oobMetrics = computeBinaryMetricsFromProbabilities(
+      dataset.labels,
+      oobProbabilitySums,
+      oobVoteCounts
+    );
+
+    let totalImportance = 0;
+    for (let featureIndex = 0; featureIndex < featureImportance.length; featureIndex += 1) {
+      totalImportance += featureImportance[featureIndex];
+    }
+    const rankedFeatureImportances = [];
+    for (let featureIndex = 0; featureIndex < featureImportance.length; featureIndex += 1) {
+      const importance = featureImportance[featureIndex];
+      if (importance <= 0) {
+        continue;
+      }
+      rankedFeatureImportances.push({
+        feature: dataset.featureColumns[featureIndex] || "f" + featureIndex,
+        index: featureIndex,
+        importance,
+        normalized_importance: totalImportance > 0 ? importance / totalImportance : 0
+      });
+    }
+    rankedFeatureImportances.sort(function (left, right) {
+      return right.importance - left.importance;
+    });
+
+    const mapProjection = buildProjectionForVisualization(normalizedRows, 900, seed + 701);
+    const inSampleMeanProbabilities = new Array(rowCount);
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      const count = inSampleVoteCounts[rowIndex];
+      inSampleMeanProbabilities[rowIndex] = count > 0 ? inSampleProbabilitySums[rowIndex] / count : 0.5;
+    }
+    const mapPoints = mapProjection
+      ? mapProjection.points.map(function (point, index) {
+          const sourceIndex = mapProjection.indices[index];
+          const probability = inSampleMeanProbabilities[sourceIndex];
+          const predicted = probability >= 0.5 ? "active" : "inactive";
+          const actual = dataset.labels[sourceIndex] ? "active" : "inactive";
+          const timeSec =
+            Array.isArray(dataset.rowTimesSeconds) &&
+            Number.isFinite(Number(dataset.rowTimesSeconds[sourceIndex]))
+              ? Number(dataset.rowTimesSeconds[sourceIndex])
+              : Number.NaN;
+          return {
+            x: point.x,
+            y: point.y,
+            category: predicted,
+            categoryIndex: predicted === "active" ? 0 : 1,
+            highlighted: predicted !== actual,
+            predicted,
+            actual,
+            probability,
+            rowIndex: sourceIndex,
+            timeSec
+          };
+        })
+      : [];
+
+    const evalSampleSize = Math.max(100, Math.min(rowCount, 700));
+    const evalIndices =
+      rowCount <= evalSampleSize
+        ? Array.from({ length: rowCount }, function (_, index) {
+            return index;
+          })
+        : sampleIndicesWithoutReplacement(rowCount, evalSampleSize, random);
+    const baselineEvalAccuracy = computeRandomForestAccuracyForIndices(
+      normalizedRows,
+      dataset.labels,
+      forestTrees,
+      evalIndices
+    );
+
+    const permutationCandidates = rankedFeatureImportances
+      .slice(0, Math.min(24, rankedFeatureImportances.length))
+      .map(function (item) {
+        return sanitizeInt(item.index, 0, 0, Math.max(0, featureCount - 1));
+      });
+    const permutationImportances = [];
+    for (let idx = 0; idx < permutationCandidates.length; idx += 1) {
+      const featureIndex = permutationCandidates[idx];
+      const replacementValues = evalIndices.map(function (rowIndex) {
+        return Number(normalizedRows[rowIndex][featureIndex] || 0);
+      });
+      for (let swap = replacementValues.length - 1; swap > 0; swap -= 1) {
+        const pick = Math.floor(random() * (swap + 1));
+        const tmp = replacementValues[swap];
+        replacementValues[swap] = replacementValues[pick];
+        replacementValues[pick] = tmp;
+      }
+
+      const permutedAccuracy = computeRandomForestAccuracyForIndices(
+        normalizedRows,
+        dataset.labels,
+        forestTrees,
+        evalIndices,
+        featureIndex,
+        replacementValues
+      );
+      const drop = baselineEvalAccuracy - permutedAccuracy;
+      permutationImportances.push({
+        feature: dataset.featureColumns[featureIndex] || "f" + featureIndex,
+        index: featureIndex,
+        accuracy_drop: drop,
+        baseline_accuracy: baselineEvalAccuracy,
+        permuted_accuracy: permutedAccuracy
+      });
+    }
+    permutationImportances.sort(function (left, right) {
+      return right.accuracy_drop - left.accuracy_drop;
+    });
+
+    const pdpFeatureIndices = permutationImportances
+      .slice(0, Math.min(2, permutationImportances.length))
+      .map(function (item) {
+        return sanitizeInt(item.index, 0, 0, Math.max(0, featureCount - 1));
+      });
+    if (pdpFeatureIndices.length === 0 && rankedFeatureImportances.length > 0) {
+      pdpFeatureIndices.push(
+        sanitizeInt(rankedFeatureImportances[0].index, 0, 0, Math.max(0, featureCount - 1))
+      );
+    }
+    const pdp = [];
+    for (let idx = 0; idx < pdpFeatureIndices.length; idx += 1) {
+      const featureIndex = pdpFeatureIndices[idx];
+      const pdpEntry = buildRandomForestPdp(
+        normalizedRows,
+        dataset.labels,
+        forestTrees,
+        featureIndex,
+        evalIndices,
+        8,
+        12
+      );
+      if (pdpEntry) {
+        pdp.push({
+          feature: dataset.featureColumns[featureIndex] || "f" + featureIndex,
+          index: featureIndex,
+          grid: pdpEntry.grid,
+          mean_probabilities: pdpEntry.meanProbabilities,
+          ice: pdpEntry.ice
+        });
+      }
+    }
+
+    const misclassified = [];
+    const borderline = [];
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      const probability = inSampleMeanProbabilities[rowIndex];
+      const predicted = probability >= 0.5 ? 1 : 0;
+      const actual = dataset.labels[rowIndex] ? 1 : 0;
+      const margin = Math.abs(probability - 0.5);
+      const entry = {
+        rowIndex,
+        timeSec:
+          Array.isArray(dataset.rowTimesSeconds) && Number.isFinite(Number(dataset.rowTimesSeconds[rowIndex]))
+            ? Number(dataset.rowTimesSeconds[rowIndex])
+            : Number.NaN,
+        actual: actual === 1 ? "active" : "inactive",
+        predicted: predicted === 1 ? "active" : "inactive",
+        probability,
+        margin
+      };
+      if (predicted !== actual) {
+        misclassified.push(entry);
+      }
+      borderline.push(entry);
+    }
+    misclassified.sort(function (left, right) {
+      return right.margin - left.margin;
+    });
+    borderline.sort(function (left, right) {
+      return left.margin - right.margin;
+    });
+
+    return {
+      command: "random-forest",
+      schema_version: "0.1.0-js",
+      status: "ok",
+      input: {
+        source: "webview-js",
+        sample_count: rowCount,
+        feature_count: featureCount,
+        feature_columns: dataset.featureColumns
+      },
+      params: {
+        source: params.source,
+        tree_count: params.treeCount,
+        max_depth: params.maxDepth,
+        min_leaf: params.minLeaf,
+        feature_ratio: params.featureRatio,
+        max_frames: params.maxFrames,
+        top_features: params.topFeatures,
+        backend: "javascript"
+      },
+      diagnostics: {
+        trees_fit: fittedTrees,
+        in_sample: inSampleMetrics,
+        oob: oobMetrics
+      },
+      feature_importances: rankedFeatureImportances.slice(0, params.topFeatures),
+      permutation_importances: permutationImportances.slice(0, params.topFeatures),
+      visualization: {
+        map: {
+          points: mapPoints,
+          explained_ratios:
+            mapProjection && Array.isArray(mapProjection.explainedRatios)
+              ? mapProjection.explainedRatios.slice(0, 2)
+              : []
+        },
+        summary: {
+          confusion: oobMetrics.confusion
+        },
+        why: {
+          gain_importances: rankedFeatureImportances.slice(0, params.topFeatures),
+          permutation_importances: permutationImportances.slice(0, params.topFeatures),
+          pdp
+        },
+        examples: {
+          misclassified: misclassified.slice(0, 12),
+          borderline: borderline.slice(0, 12)
+        }
+      }
+    };
+  }
+
+  function renderRandomForestResults() {
+    if (!rfResults) {
+      return;
+    }
+    rfResults.innerHTML = "";
+    if (!randomForestResult || typeof randomForestResult !== "object") {
+      rfResults.appendChild(
+        createMetricsGroup("Random Forest", [["Status", "Run random forest to view diagnostics."]])
+      );
+      return;
+    }
+
+    const result = asRecord(randomForestResult);
+    if (!result) {
+      rfResults.appendChild(
+        createMetricsGroup("Random Forest", [["Status", "Invalid random forest result payload."]])
+      );
+      return;
+    }
+
+    const input = asRecord(result.input);
+    const params = asRecord(result.params);
+    const diagnostics = asRecord(result.diagnostics);
+    const inSample = diagnostics ? asRecord(diagnostics.in_sample) : null;
+    const oob = diagnostics ? asRecord(diagnostics.oob) : null;
+    const oobConfusion = oob ? asRecord(oob.confusion) : null;
+    const featureImportances = Array.isArray(result.feature_importances)
+      ? result.feature_importances
+      : [];
+    const permutationImportances = Array.isArray(result.permutation_importances)
+      ? result.permutation_importances
+      : [];
+
+    rfResults.appendChild(
+      createMetricsGroup("Random Forest Input", [
+        [
+          "Feature source",
+          randomForestLastRunContext && randomForestLastRunContext.sourceDescription
+            ? randomForestLastRunContext.sourceDescription
+            : randomForestSourceMode === "stft"
+              ? "short-time STFT spectrogram features"
+              : "short-time mel features"
+        ],
+        [
+          "Frames / features (used)",
+          String(
+            randomForestLastRunContext &&
+              Number.isFinite(randomForestLastRunContext.frameCountUsed)
+              ? randomForestLastRunContext.frameCountUsed
+              : sanitizeInt(input && input.sample_count, 0, 0, 1000000000)
+          ) +
+            " / " +
+            String(
+              randomForestLastRunContext &&
+                Number.isFinite(randomForestLastRunContext.featureCountUsed)
+                ? randomForestLastRunContext.featureCountUsed
+                : sanitizeInt(input && input.feature_count, 0, 0, 1000000000)
+            )
+        ],
+        [
+          "Frames / features (original)",
+          String(
+            randomForestLastRunContext &&
+              Number.isFinite(randomForestLastRunContext.frameCountOriginal)
+              ? randomForestLastRunContext.frameCountOriginal
+              : sanitizeInt(input && input.sample_count, 0, 0, 1000000000)
+          ) +
+            " / " +
+            String(
+              randomForestLastRunContext &&
+                Number.isFinite(randomForestLastRunContext.featureCountOriginal)
+                ? randomForestLastRunContext.featureCountOriginal
+                : sanitizeInt(input && input.feature_count, 0, 0, 1000000000)
+            )
+        ],
+        [
+          "Derived classes (active/inactive)",
+          String(
+            randomForestLastRunContext && Number.isFinite(randomForestLastRunContext.activeFrames)
+              ? randomForestLastRunContext.activeFrames
+              : 0
+          ) +
+            " / " +
+            String(
+              randomForestLastRunContext &&
+                Number.isFinite(randomForestLastRunContext.inactiveFrames)
+                ? randomForestLastRunContext.inactiveFrames
+                : 0
+            )
+        ],
+        [
+          "Analysis channel",
+          randomForestLastRunContext && randomForestLastRunContext.analysisSource
+            ? randomForestLastRunContext.analysisSource
+            : getSingleChannelAnalysisLabel()
+        ],
+        [
+          "Trees / depth / min leaf",
+          String(sanitizeInt(params && params.tree_count, 0, 0, 1000000)) +
+            " / " +
+            String(sanitizeInt(params && params.max_depth, 0, 0, 1000000)) +
+            " / " +
+            String(sanitizeInt(params && params.min_leaf, 0, 0, 1000000))
+        ]
+      ])
+    );
+
+    rfResults.appendChild(
+      createMetricsGroup("Random Forest Diagnostics", [
+        [
+          "In-sample accuracy",
+          formatMetricPercent(Number(inSample && inSample.accuracy))
+        ],
+        ["OOB accuracy", formatMetricPercent(Number(oob && oob.accuracy))],
+        ["OOB precision", formatMetricPercent(Number(oob && oob.precision))],
+        ["OOB recall", formatMetricPercent(Number(oob && oob.recall))],
+        ["OOB F1", formatMetricPercent(Number(oob && oob.f1))],
+        ["OOB coverage", formatMetricPercent(Number(oob && oob.coverage))],
+        [
+          "Trees fit",
+          String(sanitizeInt(diagnostics && diagnostics.trees_fit, 0, 0, 1000000000))
+        ]
+      ])
+    );
+
+    if (oobConfusion) {
+      rfResults.appendChild(
+        createMetricsGroup("OOB Confusion", [
+          ["TP", String(sanitizeInt(oobConfusion.tp, 0, 0, 1000000000))],
+          ["TN", String(sanitizeInt(oobConfusion.tn, 0, 0, 1000000000))],
+          ["FP", String(sanitizeInt(oobConfusion.fp, 0, 0, 1000000000))],
+          ["FN", String(sanitizeInt(oobConfusion.fn, 0, 0, 1000000000))]
+        ])
+      );
+    }
+
+    if (featureImportances.length === 0) {
+      rfResults.appendChild(
+        createMetricsGroup("Feature Importances", [["Status", "No non-zero feature importances produced."]])
+      );
+    } else {
+      for (let index = 0; index < featureImportances.length; index += 1) {
+        const item = asRecord(featureImportances[index]);
+        if (!item) {
+          continue;
+        }
+        rfResults.appendChild(
+          createMetricsGroup("Feature " + (index + 1), [
+            ["Name", String(item.feature || "f" + sanitizeInt(item.index, index, 0, 1000000))],
+            ["Index", String(sanitizeInt(item.index, index, 0, 1000000))],
+            ["Importance", formatMetricNumber(Number(item.importance), 6)],
+            ["Normalized importance", formatMetricPercent(Number(item.normalized_importance))]
+          ])
+        );
+      }
+    }
+
+    for (let index = 0; index < Math.min(10, permutationImportances.length); index += 1) {
+      const item = asRecord(permutationImportances[index]);
+      if (!item) {
+        continue;
+      }
+      rfResults.appendChild(
+        createMetricsGroup("Permutation " + (index + 1), [
+          ["Name", String(item.feature || "f" + sanitizeInt(item.index, index, 0, 1000000))],
+          ["Index", String(sanitizeInt(item.index, index, 0, 1000000))],
+          ["Accuracy drop", formatMetricNumber(Number(item.accuracy_drop), 6)],
+          ["Baseline acc", formatMetricPercent(Number(item.baseline_accuracy))],
+          ["Permuted acc", formatMetricPercent(Number(item.permuted_accuracy))]
+        ])
+      );
+    }
+
+    renderRandomForestVisualizations(result);
+  }
+
+  function renderRandomForestVisualizations(result) {
+    const visualization = result ? asRecord(result.visualization) : null;
+    if (!visualization) {
+      return;
+    }
+
+    const map = asRecord(visualization.map);
+    const summary = asRecord(visualization.summary);
+    const why = asRecord(visualization.why);
+    const examples = asRecord(visualization.examples);
+
+    const mapPoints = map && Array.isArray(map.points) ? map.points : [];
+    if (mapPoints.length > 0) {
+      const explained = Array.isArray(map.explained_ratios) ? map.explained_ratios : [];
+      const card = createAnalysisVizCard(
+        "Map",
+        "PCA(2D) of RF feature space, colored by predicted class" +
+          (explained.length > 0
+            ? " | explained=" +
+              formatMetricPercent(Number(explained[0] || 0)) +
+              ", " +
+              formatMetricPercent(Number(explained[1] || 0))
+            : "") +
+          " | white-ring points are misclassified."
+      );
+      const canvas = createAnalysisCanvas(760, 280);
+      drawAnalysisScatter(
+        canvas,
+        mapPoints.map(function (entry) {
+          const point = asRecord(entry);
+          const category = point ? String(point.category || "inactive") : "inactive";
+          return {
+            x: point ? Number(point.x || 0) : 0,
+            y: point ? Number(point.y || 0) : 0,
+            category,
+            categoryIndex: category === "active" ? 0 : 1,
+            highlighted: Boolean(point && point.highlighted)
+          };
+        }),
+        [
+          { key: "active", label: "pred active", index: 0 },
+          { key: "inactive", label: "pred inactive", index: 1 }
+        ]
+      );
+      card.appendChild(canvas);
+      rfResults.appendChild(card);
+    }
+
+    const confusion = summary ? asRecord(summary.confusion) : null;
+    if (confusion) {
+      const matrix = [
+        [Number(confusion.tp || 0), Number(confusion.fn || 0)],
+        [Number(confusion.fp || 0), Number(confusion.tn || 0)]
+      ];
+      const summaryCard = createAnalysisVizCard(
+        "Summary",
+        "OOB confusion matrix (rows=true active/inactive, cols=pred active/inactive)"
+      );
+      const heatmap = createAnalysisCanvas(760, 220);
+      drawAnalysisHeatmap(
+        heatmap,
+        matrix,
+        ["true active", "true inactive"],
+        ["pred active", "pred inactive"]
+      );
+      summaryCard.appendChild(heatmap);
+      rfResults.appendChild(summaryCard);
+    }
+
+    const permutation = why && Array.isArray(why.permutation_importances) ? why.permutation_importances : [];
+    if (permutation.length > 0) {
+      const whyCard = createAnalysisVizCard(
+        "Why",
+        "Permutation feature importance (accuracy drop after shuffle)"
+      );
+      const labels = [];
+      const values = [];
+      for (let index = 0; index < Math.min(16, permutation.length); index += 1) {
+        const item = asRecord(permutation[index]);
+        if (!item) {
+          continue;
+        }
+        labels.push(String(item.feature || "f" + index));
+        values.push(Math.max(0, Number(item.accuracy_drop) || 0));
+      }
+      const bar = createAnalysisCanvas(760, Math.max(220, labels.length * 24 + 40));
+      drawAnalysisBarChart(bar, labels, values, "#f59e0b");
+      whyCard.appendChild(bar);
+
+      const pdp = why && Array.isArray(why.pdp) ? why.pdp : [];
+      for (let index = 0; index < Math.min(2, pdp.length); index += 1) {
+        const entry = asRecord(pdp[index]);
+        if (!entry) {
+          continue;
+        }
+        const meanValues = Array.isArray(entry.mean_probabilities) ? entry.mean_probabilities : [];
+        if (meanValues.length === 0) {
+          continue;
+        }
+        const subtitle = document.createElement("p");
+        subtitle.className = "analysis-viz-subtitle";
+        subtitle.textContent = "PDP: " + String(entry.feature || "feature");
+        whyCard.appendChild(subtitle);
+        const line = createAnalysisCanvas(760, 180);
+        drawPcaLinePlot(line, meanValues, { color: "#f97316" });
+        whyCard.appendChild(line);
+      }
+      rfResults.appendChild(whyCard);
+    }
+
+    const misclassified = examples && Array.isArray(examples.misclassified) ? examples.misclassified : [];
+    const borderline = examples && Array.isArray(examples.borderline) ? examples.borderline : [];
+    if (misclassified.length > 0 || borderline.length > 0) {
+      const examplesCard = createAnalysisVizCard(
+        "Examples",
+        "Misclassified and borderline frame-level examples"
+      );
+      const rows = [];
+      for (let index = 0; index < Math.min(8, misclassified.length); index += 1) {
+        const item = asRecord(misclassified[index]);
+        if (!item) {
+          continue;
+        }
+        rows.push([
+          "misclassified",
+          sanitizeInt(item.rowIndex, 0, 0, 1000000000),
+          formatMetricNumber(Number(item.timeSec), 3),
+          String(item.actual || ""),
+          String(item.predicted || ""),
+          formatMetricNumber(Number(item.probability), 4)
+        ]);
+      }
+      for (let index = 0; index < Math.min(8, borderline.length); index += 1) {
+        const item = asRecord(borderline[index]);
+        if (!item) {
+          continue;
+        }
+        rows.push([
+          "borderline",
+          sanitizeInt(item.rowIndex, 0, 0, 1000000000),
+          formatMetricNumber(Number(item.timeSec), 3),
+          String(item.actual || ""),
+          String(item.predicted || ""),
+          formatMetricNumber(Number(item.probability), 4)
+        ]);
+      }
+      if (rows.length > 0) {
+        examplesCard.appendChild(
+          createAnalysisExamplesTable(
+            ["type", "row", "time(s)", "true", "pred", "p(active)"],
+            rows
+          )
+        );
+        rfResults.appendChild(examplesCard);
+      }
+    }
+  }
+
+  function updateRandomForestControls() {
+    const hasAudio = Boolean(primaryAudio && primaryAudio.samples && primaryAudio.samples.length > 0);
+    const hasOverlay = Boolean(state.overlay.enabled && overlayParsed && overlayParsed.intervals.length > 0);
+
+    rfFeatureHint.textContent =
+      "Feature source: " +
+      (randomForestSourceMode === "stft"
+        ? "short-time STFT log-magnitude spectrogram frames"
+        : "short-time mel feature frames") +
+      ". Backend: in-browser JavaScript.";
+    rfLabelHint.textContent = hasOverlay
+      ? "Activation overlay loaded: " +
+        overlayParsed.intervals.length +
+        " intervals, mode=" +
+        overlayParsed.mode +
+        "."
+      : "Activation overlay required to derive active/inactive labels.";
+
+    rfRun.disabled = randomForestRunning || !hasAudio || !hasOverlay;
+    rfSource.disabled = randomForestRunning;
+    rfTreeCount.disabled = randomForestRunning;
+    rfMaxDepth.disabled = randomForestRunning;
+    rfMinLeaf.disabled = randomForestRunning;
+    rfFeatureRatio.disabled = randomForestRunning;
+    rfMaxFrames.disabled = randomForestRunning;
+    rfTopFeatures.disabled = randomForestRunning;
   }
 
   function getSpfParamsFromInputs() {
@@ -4045,6 +6094,7 @@
     const rowStride = Math.max(1, Math.ceil(frameCount / params.maxFrames));
     const rows = [];
     const labels = [];
+    const rowTimesSeconds = [];
     for (let frameIndex = 0; frameIndex < frameCount; frameIndex += rowStride) {
       const sourceRow = featureRows[frameIndex];
       const row = new Float32Array(sourceRow.length);
@@ -4054,6 +6104,7 @@
       }
       rows.push(row);
       labels.push(classSummary.labels[frameIndex] === "active" ? 1 : 0);
+      rowTimesSeconds.push(Number(frameTimesSeconds[frameIndex] || 0));
     }
     if (rows.length < 8) {
       throw new Error("Not enough frames after sampling for symbolic analysis.");
@@ -4077,6 +6128,7 @@
     return {
       rows,
       labels,
+      rowTimesSeconds,
       runContext: {
         source: params.source,
         sourceDescription: featureSource.sourceDescription,
@@ -4490,6 +6542,76 @@
     setSpfProgress(94);
     await waitForUiFrame();
     const topPatterns = patternStats.patterns.slice(0, params.topPatterns);
+    const normalizedRows = zscoreRowsByColumn(dataset.rows);
+    const projection = buildProjectionForVisualization(
+      normalizedRows,
+      900,
+      16001 + params.forestTrees * 13
+    );
+    const mapPoints = projection
+      ? projection.points.map(function (point, index) {
+          const sourceIndex = projection.indices[index];
+          const classLabel = dataset.labels[sourceIndex] ? "active" : "inactive";
+          return {
+            x: point.x,
+            y: point.y,
+            category: classLabel,
+            categoryIndex: classLabel === "active" ? 0 : 1,
+            rowIndex: sourceIndex,
+            timeSec:
+              Array.isArray(dataset.rowTimesSeconds) &&
+              Number.isFinite(Number(dataset.rowTimesSeconds[sourceIndex]))
+                ? Number(dataset.rowTimesSeconds[sourceIndex])
+                : Number.NaN
+          };
+        })
+      : [];
+
+    const patternLabels = topPatterns.map(function (pattern) {
+      const record = asRecord(pattern);
+      return record ? String(record.word || "") : "";
+    });
+    const classPatternRates = [
+      topPatterns.map(function (pattern) {
+        const record = asRecord(pattern);
+        return Number(record && record.activeSupport) || 0;
+      }),
+      topPatterns.map(function (pattern) {
+        const record = asRecord(pattern);
+        return Number(record && record.inactiveSupport) || 0;
+      })
+    ];
+
+    const patternExamples = [];
+    for (let patternIndex = 0; patternIndex < patternLabels.length; patternIndex += 1) {
+      const word = patternLabels[patternIndex];
+      if (!word) {
+        continue;
+      }
+      const occurrences = [];
+      for (let rowIndex = 0; rowIndex < words.length; rowIndex += 1) {
+        if (words[rowIndex] !== word) {
+          continue;
+        }
+        occurrences.push({
+          rowIndex,
+          timeSec:
+            Array.isArray(dataset.rowTimesSeconds) &&
+            Number.isFinite(Number(dataset.rowTimesSeconds[rowIndex]))
+              ? Number(dataset.rowTimesSeconds[rowIndex])
+              : Number.NaN,
+          classLabel: dataset.labels[rowIndex] ? "active" : "inactive"
+        });
+        if (occurrences.length >= 3) {
+          break;
+        }
+      }
+      patternExamples.push({
+        word,
+        occurrences
+      });
+    }
+
     return {
       command: "symbolic-pattern-forest",
       schema_version: "0.1.0-js",
@@ -4514,7 +6636,29 @@
         class_entropy: patternStats.entropyY,
         forest
       },
-      top_patterns: topPatterns
+      top_patterns: topPatterns,
+      visualization: {
+        map: {
+          points: mapPoints,
+          explained_ratios:
+            projection && Array.isArray(projection.explainedRatios)
+              ? projection.explainedRatios.slice(0, 2)
+              : []
+        },
+        summary: {
+          pattern_importances:
+            forest && Array.isArray(forest.patternImportances)
+              ? forest.patternImportances.slice(0, Math.min(20, forest.patternImportances.length))
+              : []
+        },
+        why: {
+          pattern_labels: patternLabels,
+          class_pattern_rates: classPatternRates
+        },
+        examples: {
+          pattern_examples: patternExamples
+        }
+      }
     };
   }
 
@@ -4606,6 +6750,136 @@
           ["Log-odds(active vs inactive)", formatMetricNumber(Number(pattern.logOdds), 4)]
         ])
       );
+    }
+
+    renderSpfVisualizations(result);
+  }
+
+  function renderSpfVisualizations(result) {
+    const visualization = result ? asRecord(result.visualization) : null;
+    if (!visualization) {
+      return;
+    }
+
+    const map = asRecord(visualization.map);
+    const summary = asRecord(visualization.summary);
+    const why = asRecord(visualization.why);
+    const examples = asRecord(visualization.examples);
+
+    const mapPoints = map && Array.isArray(map.points) ? map.points : [];
+    if (mapPoints.length > 0) {
+      const explained = Array.isArray(map.explained_ratios) ? map.explained_ratios : [];
+      const card = createAnalysisVizCard(
+        "Map",
+        "PCA(2D) over symbolic feature vectors, colored by class" +
+          (explained.length > 0
+            ? " | explained=" +
+              formatMetricPercent(Number(explained[0] || 0)) +
+              ", " +
+              formatMetricPercent(Number(explained[1] || 0))
+            : "")
+      );
+      const canvas = createAnalysisCanvas(760, 280);
+      drawAnalysisScatter(
+        canvas,
+        mapPoints.map(function (entry) {
+          const point = asRecord(entry);
+          const category = point ? String(point.category || "inactive") : "inactive";
+          return {
+            x: point ? Number(point.x || 0) : 0,
+            y: point ? Number(point.y || 0) : 0,
+            category,
+            categoryIndex: category === "active" ? 0 : 1
+          };
+        }),
+        [
+          { key: "active", label: "active", index: 0 },
+          { key: "inactive", label: "inactive", index: 1 }
+        ]
+      );
+      card.appendChild(canvas);
+      spfResults.appendChild(card);
+    }
+
+    const patternImportances =
+      summary && Array.isArray(summary.pattern_importances) ? summary.pattern_importances : [];
+    if (patternImportances.length > 0) {
+      const summaryCard = createAnalysisVizCard(
+        "Summary",
+        "Pattern selection frequency / importance from prototype forest"
+      );
+      const labels = [];
+      const values = [];
+      for (let index = 0; index < Math.min(16, patternImportances.length); index += 1) {
+        const item = asRecord(patternImportances[index]);
+        if (!item) {
+          continue;
+        }
+        labels.push(String(item.word || "pattern-" + (index + 1)));
+        values.push(Math.max(0, Number(item.importance) || 0));
+      }
+      const bar = createAnalysisCanvas(760, Math.max(220, labels.length * 24 + 40));
+      drawAnalysisBarChart(bar, labels, values, "#34d399");
+      summaryCard.appendChild(bar);
+      spfResults.appendChild(summaryCard);
+    }
+
+    const patternLabels = why && Array.isArray(why.pattern_labels) ? why.pattern_labels : [];
+    const classPatternRates = why && Array.isArray(why.class_pattern_rates) ? why.class_pattern_rates : [];
+    if (patternLabels.length > 0 && classPatternRates.length >= 2) {
+      const whyCard = createAnalysisVizCard(
+        "Why",
+        "Pattern vocabulary by class (rows=active/inactive, cols=top patterns)"
+      );
+      const heatmap = createAnalysisCanvas(760, 220);
+      drawAnalysisHeatmap(
+        heatmap,
+        classPatternRates.slice(0, 2),
+        ["active", "inactive"],
+        patternLabels
+      );
+      whyCard.appendChild(heatmap);
+      spfResults.appendChild(whyCard);
+    }
+
+    const patternExamples =
+      examples && Array.isArray(examples.pattern_examples) ? examples.pattern_examples : [];
+    if (patternExamples.length > 0) {
+      const examplesCard = createAnalysisVizCard(
+        "Examples",
+        "Example occurrences for top symbolic patterns"
+      );
+      const rows = [];
+      for (let index = 0; index < Math.min(10, patternExamples.length); index += 1) {
+        const item = asRecord(patternExamples[index]);
+        if (!item) {
+          continue;
+        }
+        const word = String(item.word || "");
+        const occurrences = Array.isArray(item.occurrences) ? item.occurrences : [];
+        if (occurrences.length === 0) {
+          rows.push([word, "-", "-", "-"]);
+          continue;
+        }
+        for (let occIndex = 0; occIndex < Math.min(3, occurrences.length); occIndex += 1) {
+          const occ = asRecord(occurrences[occIndex]);
+          if (!occ) {
+            continue;
+          }
+          rows.push([
+            word,
+            sanitizeInt(occ.rowIndex, 0, 0, 1000000000),
+            formatMetricNumber(Number(occ.timeSec), 3),
+            String(occ.classLabel || "")
+          ]);
+        }
+      }
+      if (rows.length > 0) {
+        examplesCard.appendChild(
+          createAnalysisExamplesTable(["pattern", "row", "time(s)", "class"], rows)
+        );
+        spfResults.appendChild(examplesCard);
+      }
     }
   }
 
@@ -10850,8 +13124,7 @@
       empty.textContent = "No transform views selected. Add one with \"Add View\".";
       renderStackContainer.appendChild(empty);
       renderMetricsReport();
-      updateRClusterControls();
-      updateSpfControls();
+      updateAnalysisPanelsAndControls();
       return;
     }
 
@@ -11091,8 +13364,7 @@
 
     updateAnimatedPlayheads();
     renderMetricsReport();
-    updateRClusterControls();
-    updateSpfControls();
+    updateAnalysisPanelsAndControls();
   }
 
   function updateAnimatedPlayheads() {
@@ -11230,8 +13502,7 @@
 
     if (message.type === "rClusterRunStarted") {
       rClusterRunning = true;
-      updateRClusterControls();
-      updateSpfControls();
+      updateAnalysisPanelsAndControls();
       startRClusterProgress(Math.max(30, Number(rclusterProgress.value) || 0));
       setRClusterStatus("Running r-clustering...");
       return;
@@ -11244,8 +13515,7 @@
       const runContext = payload ? asRecord(payload.runContext) : null;
       rClusterResult = resultPayload || null;
       rClusterLastRunContext = runContext || rClusterLastRunContext;
-      updateRClusterControls();
-      updateSpfControls();
+      updateAnalysisPanelsAndControls();
       completeRClusterProgress();
 
       const diagnostics = resultPayload ? asRecord(resultPayload.diagnostics) : null;
@@ -11266,8 +13536,7 @@
     if (message.type === "rClusterError") {
       const payload = asRecord(message.payload);
       rClusterRunning = false;
-      updateRClusterControls();
-      updateSpfControls();
+      updateAnalysisPanelsAndControls();
       failRClusterProgress();
       const errorMessage = sanitizeStringValue(payload && payload.message, 2048);
       setRClusterStatus("r-clustering failed: " + (errorMessage || "Unknown toolbox error."));
@@ -11543,10 +13812,14 @@
     postState();
   });
 
+  analysisToolSelect.addEventListener("change", function () {
+    updateAnalysisPanelsAndControls();
+    postState();
+  });
+
   function syncRClusterParamsAndControls() {
     syncRClusterParamInputs();
-    updateRClusterControls();
-    updateSpfControls();
+    updateAnalysisPanelsAndControls();
   }
 
   rclusterRepresentation.addEventListener("change", function () {
@@ -11582,7 +13855,7 @@
 
     rClusterLastRunContext = dataset.runContext;
     rClusterRunning = true;
-    updateRClusterControls();
+    updateAnalysisPanelsAndControls();
     setRClusterStatus("Running in-browser r-clustering (JavaScript backend)...");
     startRClusterProgress(12);
 
@@ -11590,7 +13863,7 @@
       .then(function (result) {
         rClusterRunning = false;
         rClusterResult = result;
-        updateRClusterControls();
+        updateAnalysisPanelsAndControls();
         completeRClusterProgress();
 
         const diagnostics = asRecord(result.diagnostics);
@@ -11608,7 +13881,7 @@
       })
       .catch(function (error) {
         rClusterRunning = false;
-        updateRClusterControls();
+        updateAnalysisPanelsAndControls();
         failRClusterProgress();
         setRClusterStatus("r-clustering failed: " + toErrorText(error));
       });
@@ -11622,9 +13895,78 @@
     );
   }
 
+  function syncRandomForestParamsAndControls() {
+    syncRandomForestParamsFromInputs();
+    updateAnalysisPanelsAndControls();
+  }
+
+  [rfSource, rfTreeCount, rfMaxDepth, rfMinLeaf, rfFeatureRatio, rfMaxFrames, rfTopFeatures].forEach(
+    function (input) {
+      input.addEventListener("change", syncRandomForestParamsAndControls);
+    }
+  );
+
+  rfRun.addEventListener("click", function () {
+    if (randomForestRunning) {
+      return;
+    }
+
+    const params = syncRandomForestParamsFromInputs();
+    let dataset;
+    try {
+      dataset = buildRandomForestDataset(params);
+    } catch (error) {
+      setRandomForestProgress(0);
+      setRandomForestStatus("Random forest prerequisites failed: " + toErrorText(error));
+      return;
+    }
+
+    randomForestLastRunContext = dataset.runContext;
+    randomForestRunning = true;
+    updateAnalysisPanelsAndControls();
+    setRandomForestStatus("Running random forest (JavaScript backend)...");
+    setRandomForestProgress(8);
+
+    void runRandomForestInBrowserLocal(dataset, params)
+      .then(function (result) {
+        randomForestRunning = false;
+        randomForestResult = result;
+        updateAnalysisPanelsAndControls();
+        setRandomForestProgress(100);
+        window.setTimeout(function () {
+          if (!randomForestRunning) {
+            setRandomForestProgress(0);
+          }
+        }, 700);
+
+        const diagnostics = asRecord(result.diagnostics);
+        const oob = diagnostics ? asRecord(diagnostics.oob) : null;
+        setRandomForestStatus(
+          "Random forest complete (JS). oob_accuracy=" +
+            formatMetricPercent(Number(oob && oob.accuracy)) +
+            ", oob_f1=" +
+            formatMetricPercent(Number(oob && oob.f1)) +
+            "."
+        );
+        renderRandomForestResults();
+      })
+      .catch(function (error) {
+        randomForestRunning = false;
+        updateAnalysisPanelsAndControls();
+        setRandomForestProgress(0);
+        setRandomForestStatus("Random forest failed: " + toErrorText(error));
+      });
+  });
+
+  if (rfStatus.textContent.trim().length === 0) {
+    setRandomForestStatus("Ready to run random forest diagnostics.");
+  } else {
+    setRandomForestStatus("Ready to run random forest diagnostics (JavaScript backend).");
+  }
+
   function syncSpfParamsAndControls() {
     syncSpfParamsFromInputs();
-    updateSpfControls();
+    updateAnalysisPanelsAndControls();
   }
 
   [
@@ -11655,7 +13997,7 @@
 
     spfLastRunContext = dataset.runContext;
     spfRunning = true;
-    updateSpfControls();
+    updateAnalysisPanelsAndControls();
     setSpfStatus("Running symbolic pattern forest (JavaScript backend)...");
     setSpfProgress(8);
 
@@ -11663,7 +14005,7 @@
       .then(function (result) {
         spfRunning = false;
         spfResult = result;
-        updateSpfControls();
+        updateAnalysisPanelsAndControls();
         setSpfProgress(100);
         window.setTimeout(function () {
           if (!spfRunning) {
@@ -11684,7 +14026,7 @@
       })
       .catch(function (error) {
         spfRunning = false;
-        updateSpfControls();
+        updateAnalysisPanelsAndControls();
         setSpfProgress(0);
         setSpfStatus("SPF failed: " + toErrorText(error));
       });
@@ -11700,12 +14042,14 @@
 
   syncControlsFromState();
   syncRClusterParamInputs();
+  syncRandomForestParamsFromInputs();
   syncSpfParamsFromInputs();
-  updateRClusterControls();
-  updateSpfControls();
+  updateAnalysisPanelsAndControls();
   setRClusterProgress(0);
+  setRandomForestProgress(0);
   setSpfProgress(0);
   renderRClusterResults();
+  renderRandomForestResults();
   renderSpfResults();
   if (state.comparison.secondAudioName) {
     setComparisonStatus(

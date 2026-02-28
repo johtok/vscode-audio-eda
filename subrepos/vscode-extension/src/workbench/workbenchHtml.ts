@@ -225,61 +225,104 @@ export function buildWorkbenchHtml(
         />
         <p id="pca-guidance" class="hint"></p>
 
-        <h2>r-Clustering</h2>
-        <label class="row" for="rcluster-representation">Feature source</label>
-        <select id="rcluster-representation">
-          <option value="mel">Short-time mel features</option>
-          <option value="stft">Short-time STFT spectrogram features</option>
+        <h2>Analysis Tool</h2>
+        <label class="row" for="analysis-tool-select">Active tool</label>
+        <select id="analysis-tool-select">
+          <option value="rcluster">r-Clustering</option>
+          <option value="random_forest" selected>Random Forest</option>
+          <option value="spf">Symbolic Pattern Forest</option>
         </select>
-        <p id="rcluster-feature-path" class="hint">
-          Features are generated from the current primary audio clip.
-        </p>
-        <p id="rcluster-labels-path" class="hint">
-          Labels are generated from activation overlay intervals (active/inactive classes).
-        </p>
-        <label class="row" for="rcluster-k">k (clusters)</label>
-        <input id="rcluster-k" type="number" min="2" max="64" step="1" value="2" />
-        <label class="row" for="rcluster-seed">Random seed</label>
-        <input id="rcluster-seed" type="number" min="-2147483648" max="2147483647" step="1" value="0" />
-        <label class="row" for="rcluster-max-iter">Max iterations</label>
-        <input id="rcluster-max-iter" type="number" min="4" max="512" step="1" value="32" />
-        <label class="row" for="rcluster-stability-runs">Stability runs</label>
-        <input id="rcluster-stability-runs" type="number" min="1" max="48" step="1" value="6" />
-        <label class="row" for="rcluster-row-ratio">Row sampling ratio</label>
-        <input id="rcluster-row-ratio" type="number" min="0.1" max="1" step="0.05" value="0.8" />
-        <label class="row" for="rcluster-feature-ratio">Feature sampling ratio</label>
-        <input id="rcluster-feature-ratio" type="number" min="0.1" max="1" step="0.05" value="0.8" />
-        <button id="rcluster-run" type="button">Run r-clustering</button>
-        <progress id="rcluster-progress" class="rcluster-progress" max="100" value="0"></progress>
-        <p id="rcluster-status" class="hint">Ready to run r-clustering from generated short-time features.</p>
-        <div id="rcluster-results" class="rcluster-results"></div>
 
-        <h2>Symbolic Pattern Forest</h2>
-        <label class="row" for="spf-source">Feature source</label>
-        <select id="spf-source">
-          <option value="mel">Short-time mel features</option>
-          <option value="stft">Short-time STFT spectrogram features</option>
-        </select>
-        <p id="spf-feature-hint" class="hint">
-          Symbolization uses generated short-time features from the current primary audio clip.
-        </p>
-        <p id="spf-label-hint" class="hint">
-          Class labels are derived from activation overlay intervals (active/inactive).
-        </p>
-        <label class="row" for="spf-alphabet-size">Alphabet size</label>
-        <input id="spf-alphabet-size" type="number" min="3" max="12" step="1" value="6" />
-        <label class="row" for="spf-word-length">Word length</label>
-        <input id="spf-word-length" type="number" min="2" max="64" step="1" value="12" />
-        <label class="row" for="spf-max-frames">Max frames</label>
-        <input id="spf-max-frames" type="number" min="128" max="8000" step="1" value="2000" />
-        <label class="row" for="spf-top-patterns">Top patterns</label>
-        <input id="spf-top-patterns" type="number" min="5" max="200" step="1" value="20" />
-        <label class="row" for="spf-forest-trees">Prototype forest trees</label>
-        <input id="spf-forest-trees" type="number" min="8" max="256" step="1" value="48" />
-        <button id="spf-run" type="button">Run symbolic pattern forest</button>
-        <progress id="spf-progress" class="spf-progress" max="100" value="0"></progress>
-        <p id="spf-status" class="hint">Ready to run symbolic pattern diagnostics.</p>
-        <div id="spf-results" class="spf-results"></div>
+        <section id="analysis-panel-rcluster" class="analysis-tool-panel">
+          <h2>r-Clustering</h2>
+          <label class="row" for="rcluster-representation">Feature source</label>
+          <select id="rcluster-representation">
+            <option value="mel">Short-time mel features</option>
+            <option value="stft">Short-time STFT spectrogram features</option>
+          </select>
+          <p id="rcluster-feature-path" class="hint">
+            Features are generated from the current primary audio clip.
+          </p>
+          <p id="rcluster-labels-path" class="hint">
+            Labels are generated from activation overlay intervals (active/inactive classes).
+          </p>
+          <label class="row" for="rcluster-k">k (clusters)</label>
+          <input id="rcluster-k" type="number" min="2" max="64" step="1" value="2" />
+          <label class="row" for="rcluster-seed">Random seed</label>
+          <input id="rcluster-seed" type="number" min="-2147483648" max="2147483647" step="1" value="0" />
+          <label class="row" for="rcluster-max-iter">Max iterations</label>
+          <input id="rcluster-max-iter" type="number" min="4" max="512" step="1" value="32" />
+          <label class="row" for="rcluster-stability-runs">Stability runs</label>
+          <input id="rcluster-stability-runs" type="number" min="1" max="48" step="1" value="6" />
+          <label class="row" for="rcluster-row-ratio">Row sampling ratio</label>
+          <input id="rcluster-row-ratio" type="number" min="0.1" max="1" step="0.05" value="0.8" />
+          <label class="row" for="rcluster-feature-ratio">Feature sampling ratio</label>
+          <input id="rcluster-feature-ratio" type="number" min="0.1" max="1" step="0.05" value="0.8" />
+          <button id="rcluster-run" type="button">Run r-clustering</button>
+          <progress id="rcluster-progress" class="rcluster-progress" max="100" value="0"></progress>
+          <p id="rcluster-status" class="hint">Ready to run r-clustering from generated short-time features.</p>
+          <div id="rcluster-results" class="rcluster-results"></div>
+        </section>
+
+        <section id="analysis-panel-random-forest" class="analysis-tool-panel">
+          <h2>Random Forest</h2>
+          <label class="row" for="rf-source">Feature source</label>
+          <select id="rf-source">
+            <option value="mel">Short-time mel features</option>
+            <option value="stft">Short-time STFT spectrogram features</option>
+          </select>
+          <p id="rf-feature-hint" class="hint">
+            Features are generated from the current primary audio clip.
+          </p>
+          <p id="rf-label-hint" class="hint">
+            Labels are generated from activation overlay intervals (active/inactive classes).
+          </p>
+          <label class="row" for="rf-tree-count">Tree count</label>
+          <input id="rf-tree-count" type="number" min="8" max="512" step="1" value="96" />
+          <label class="row" for="rf-max-depth">Max depth</label>
+          <input id="rf-max-depth" type="number" min="1" max="24" step="1" value="8" />
+          <label class="row" for="rf-min-leaf">Min leaf samples</label>
+          <input id="rf-min-leaf" type="number" min="1" max="128" step="1" value="4" />
+          <label class="row" for="rf-feature-ratio">Feature sample ratio</label>
+          <input id="rf-feature-ratio" type="number" min="0.05" max="1" step="0.05" value="0.35" />
+          <label class="row" for="rf-max-frames">Max frames</label>
+          <input id="rf-max-frames" type="number" min="128" max="8000" step="1" value="2200" />
+          <label class="row" for="rf-top-features">Top features</label>
+          <input id="rf-top-features" type="number" min="5" max="200" step="1" value="20" />
+          <button id="rf-run" type="button">Run random forest</button>
+          <progress id="rf-progress" class="rf-progress" max="100" value="0"></progress>
+          <p id="rf-status" class="hint">Ready to run random forest diagnostics.</p>
+          <div id="rf-results" class="rf-results"></div>
+        </section>
+
+        <section id="analysis-panel-spf" class="analysis-tool-panel">
+          <h2>Symbolic Pattern Forest</h2>
+          <label class="row" for="spf-source">Feature source</label>
+          <select id="spf-source">
+            <option value="mel">Short-time mel features</option>
+            <option value="stft">Short-time STFT spectrogram features</option>
+          </select>
+          <p id="spf-feature-hint" class="hint">
+            Symbolization uses generated short-time features from the current primary audio clip.
+          </p>
+          <p id="spf-label-hint" class="hint">
+            Class labels are derived from activation overlay intervals (active/inactive).
+          </p>
+          <label class="row" for="spf-alphabet-size">Alphabet size</label>
+          <input id="spf-alphabet-size" type="number" min="3" max="12" step="1" value="6" />
+          <label class="row" for="spf-word-length">Word length</label>
+          <input id="spf-word-length" type="number" min="2" max="64" step="1" value="12" />
+          <label class="row" for="spf-max-frames">Max frames</label>
+          <input id="spf-max-frames" type="number" min="128" max="8000" step="1" value="2000" />
+          <label class="row" for="spf-top-patterns">Top patterns</label>
+          <input id="spf-top-patterns" type="number" min="5" max="200" step="1" value="20" />
+          <label class="row" for="spf-forest-trees">Prototype forest trees</label>
+          <input id="spf-forest-trees" type="number" min="8" max="256" step="1" value="48" />
+          <button id="spf-run" type="button">Run symbolic pattern forest</button>
+          <progress id="spf-progress" class="spf-progress" max="100" value="0"></progress>
+          <p id="spf-status" class="hint">Ready to run symbolic pattern diagnostics.</p>
+          <div id="spf-results" class="spf-results"></div>
+        </section>
 
         <h2>Multichannel</h2>
         <label id="multichannel-enabled-row" class="row"><input id="multichannel-enabled" type="checkbox" /> Enable multichannel mode</label>
