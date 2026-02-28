@@ -1,9 +1,9 @@
 {
   "name": "vscode-audio-eda",
-  "displayName": "VSCode Audio EDA",
+  "displayName": "Audio EDA",
   "description": "VS Code extension for audio EDA and ML dataset diagnostics",
   "version": "1.0.0",
-  "publisher": "local-dev",
+  "publisher": "johtok",
   "license": "MIT",
   "engines": {
     "vscode": "^1.90.0"
@@ -22,19 +22,7 @@
   "activationEvents": [
     "onStartupFinished",
     "onView:audioEdaSidebar",
-    "onCustomEditor:audioEda.editor",
-    "onCommand:audioEda.openWorkbench",
-    "onCommand:audioEda.openPresetWorkspace",
-    "onCommand:audioEda.openPresetTransforms",
-    "onCommand:audioEda.openPresetMetrics",
-    "onCommand:audioEda.openPresetPca",
-    "onCommand:audioEda.openWorkbenchForFile",
-    "onCommand:audioEda.reopenActiveWithAudioEda",
-    "onCommand:audioEda.toggleAutoOpenOnFocus",
-    "onCommand:audioEda.openExtensionSettings",
-    "onCommand:audioEda.inspectFile",
-    "onCommand:audioEda.summarizeFolder",
-    "onCommand:audioEda.runCastorPrototype"
+    "onCustomEditor:audioEda.editor"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -171,16 +159,36 @@
         "viewType": "audioEda.editor",
         "displayName": "Audio EDA Workspace",
         "selector": [
-          { "filenamePattern": "*.[wW][aA][vV]" },
-          { "filenamePattern": "*.[fF][lL][aA][cC]" },
-          { "filenamePattern": "*.[mM][pP]3" },
-          { "filenamePattern": "*.[mM][pP][gG][aA]" },
-          { "filenamePattern": "*.[mM][pP][eE][gG]" },
-          { "filenamePattern": "*.[oO][gG][gG]" },
-          { "filenamePattern": "*.[mM]4[aA]" },
-          { "filenamePattern": "*.[aA][aA][cC]" },
-          { "filenamePattern": "*.[oO][pP][uU][sS]" },
-          { "filenamePattern": "*.[sS][pP][hH]" }
+          {
+            "filenamePattern": "*.[wW][aA][vV]"
+          },
+          {
+            "filenamePattern": "*.[fF][lL][aA][cC]"
+          },
+          {
+            "filenamePattern": "*.[mM][pP]3"
+          },
+          {
+            "filenamePattern": "*.[mM][pP][gG][aA]"
+          },
+          {
+            "filenamePattern": "*.[mM][pP][eE][gG]"
+          },
+          {
+            "filenamePattern": "*.[oO][gG][gG]"
+          },
+          {
+            "filenamePattern": "*.[mM]4[aA]"
+          },
+          {
+            "filenamePattern": "*.[aA][aA][cC]"
+          },
+          {
+            "filenamePattern": "*.[oO][pP][uU][sS]"
+          },
+          {
+            "filenamePattern": "*.[sS][pP][hH]"
+          }
         ],
         "priority": "option"
       }
@@ -220,5 +228,14 @@
     "@types/node": "^20.14.10",
     "@types/vscode": "^1.90.0",
     "typescript": "^5.5.4"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/johtok/vscode-audio-eda.git"
+  },
+  "bugs": {
+    "url": "https://github.com/johtok/vscode-audio-eda/issues"
+  },
+  "homepage": "https://github.com/johtok/vscode-audio-eda#readme",
+  "icon": "media/marketplace-icon.png"
 }

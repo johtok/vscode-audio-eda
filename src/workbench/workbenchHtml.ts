@@ -72,7 +72,6 @@ export function buildWorkbenchHtml(
       <section class="panel stack-panel">
         <div class="panel-header">
           <h2>Stacked Views</h2>
-          <button id="add-transform" type="button">Add View</button>
         </div>
         <div class="media-inputs">
           <label class="row" for="primary-audio-file">Primary audio clip</label>
@@ -81,13 +80,8 @@ export function buildWorkbenchHtml(
           <audio id="primary-audio-player" controls preload="metadata"></audio>
           <p id="audio-status" class="hint">Select an audio file to render transforms.</p>
           <p id="audio-lock-status" class="hint"></p>
-
-          <label class="row" for="custom-filterbank-csv">Custom filterbank weights (CSV)</label>
-          <input id="custom-filterbank-csv" type="file" accept=".csv" />
-          <p id="filterbank-status" class="hint">
-            Required for <code>custom_filterbank</code> transform. Rows are filters; columns are weights.
-          </p>
         </div>
+        <button id="add-transform" type="button">Add View</button>
         <ul id="stack-list" class="stack-list"></ul>
         <p id="stack-reorder-hint" class="hint">
           Reorder by dragging rows with the <strong>|||</strong> handle, or focus a handle and use
@@ -141,6 +135,13 @@ export function buildWorkbenchHtml(
         <label class="row" for="overlay-flag-color">Flag highlight color</label>
         <input id="overlay-flag-color" type="color" value="#ef4444" />
         <p id="overlay-csv-hint" class="hint"></p>
+
+        <h2>Custom Filterbank</h2>
+        <label class="row" for="custom-filterbank-csv">Custom filterbank weights (CSV)</label>
+        <input id="custom-filterbank-csv" type="file" accept=".csv" />
+        <p id="filterbank-status" class="hint">
+          Required for <code>custom_filterbank</code> transform. Rows are filters; columns are weights.
+        </p>
 
         <h2>Comparison</h2>
         <label class="row" for="comparison-mode">Mode</label>

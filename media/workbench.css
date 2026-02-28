@@ -445,8 +445,13 @@ input.is-locked {
   transition: left 120ms ease, width 120ms ease;
 }
 
+.transform-scrollbar-track.is-dragging {
+  cursor: grabbing;
+}
+
 .transform-scrollbar-thumb.is-dragging {
   cursor: grabbing;
+  transition: none;
 }
 
 .transform-scrollbar-playhead {

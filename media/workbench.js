@@ -9359,6 +9359,42 @@
     };
   }
 
+  function getSynchronizedViewIds() {
+    const ids = new Set();
+
+    state.stack.forEach(function (item) {
+      ids.add(item.id);
+    });
+
+    if (state.pca && state.pca.enabled) {
+      ids.add(getPcaVirtualViewId());
+    }
+
+    Object.keys(viewStateById).forEach(function (id) {
+      ids.add(id);
+    });
+
+    if (selectedViewId) {
+      ids.add(selectedViewId);
+    }
+
+    return Array.from(ids);
+  }
+
+  function syncPanZoomFromView(sourceViewId) {
+    const sourceState = ensureViewState(sourceViewId);
+
+    getSynchronizedViewIds().forEach(function (targetId) {
+      if (targetId === sourceViewId) {
+        return;
+      }
+
+      const targetState = ensureViewState(targetId);
+      targetState.zoom = sourceState.zoom;
+      targetState.offset = sourceState.offset;
+    });
+  }
+
   function setViewZoom(viewId, domainLength, nextZoom, anchorRatio) {
     const viewState = ensureViewState(viewId);
     const oldWindow = computeViewWindow(domainLength, viewId);
@@ -9378,6 +9414,11 @@
     viewState.offset = newWindow.maxStart > 0 ? clampedStart / newWindow.maxStart : 0;
   }
 
+  function setAllViewsZoom(viewId, domainLength, nextZoom, anchorRatio) {
+    setViewZoom(viewId, domainLength, nextZoom, anchorRatio);
+    syncPanZoomFromView(viewId);
+  }
+
   function setViewOffsetFromStartRatio(viewId, domainLength, startRatio) {
     const viewState = ensureViewState(viewId);
     const windowInfo = computeViewWindow(domainLength, viewId);
@@ -9392,30 +9433,111 @@
     viewState.offset = clampedStartRatio / availableStartRatio;
   }
 
+  function setAllViewsOffsetFromStartRatio(viewId, domainLength, startRatio) {
+    setViewOffsetFromStartRatio(viewId, domainLength, startRatio);
+    syncPanZoomFromView(viewId);
+  }
+
+  function setAllViewsOffsetNormalized(viewId, nextOffset) {
+    const viewState = ensureViewState(viewId);
+    viewState.offset = clamp(nextOffset, 0, 1);
+    syncPanZoomFromView(viewId);
+  }
+
+  function resetAllViewsPanZoom(viewId) {
+    const viewState = ensureViewState(viewId);
+    viewState.zoom = 1;
+    viewState.offset = 0;
+    syncPanZoomFromView(viewId);
+  }
+
   function localRatioToGlobalRatio(viewId, domainLength, localRatio) {
-    const windowInfo = computeViewWindow(domainLength, viewId);
-    const clampedLocal = clamp(localRatio, 0, 1);
+    const safeDomainLength =
+      Number.isFinite(Number(domainLength)) && Number(domainLength) > 1
+        ? Math.round(Number(domainLength))
+        : 1;
+    const windowInfo = computeViewWindow(safeDomainLength, viewId);
+    const clampedLocal = Number.isFinite(Number(localRatio)) ? clamp(Number(localRatio), 0, 1) : 0;
+
+    if (safeDomainLength <= 1 || windowInfo.visibleCount <= 1) {
+      return clampedLocal;
+    }
 
     const globalIndex =
       windowInfo.startIndex + clampedLocal * Math.max(0, windowInfo.visibleCount - 1);
 
-    return globalIndex / Math.max(1, domainLength - 1);
+    const globalRatio = globalIndex / Math.max(1, safeDomainLength - 1);
+    return Number.isFinite(globalRatio) ? clamp(globalRatio, 0, 1) : clampedLocal;
   }
 
   function seekAudioAtGlobalRatio(globalRatio) {
-    if (!primaryAudio || !Number.isFinite(primaryAudio.duration) || primaryAudio.duration <= 0) {
+    const playerDuration = Number(primaryAudioPlayer.duration);
+    const decodedDuration = primaryAudio ? Number(primaryAudio.duration) : Number.NaN;
+    const duration =
+      Number.isFinite(playerDuration) && playerDuration > 0
+        ? playerDuration
+        : Number.isFinite(decodedDuration) && decodedDuration > 0
+          ? decodedDuration
+          : 0;
+    if (duration <= 0) {
       return;
     }
 
-    const clamped = clamp(globalRatio, 0, 1);
-    primaryAudioPlayer.currentTime = clamped * primaryAudio.duration;
+    const clamped = Number.isFinite(Number(globalRatio)) ? clamp(Number(globalRatio), 0, 1) : 0;
+    primaryAudioPlayer.currentTime = clamped * duration;
   }
 
-  function selectView(viewId) {
+  function isTypingTarget(target) {
+    if (!target || typeof target !== "object") {
+      return false;
+    }
+
+    const element = target;
+    const tagName = typeof element.tagName === "string" ? element.tagName.toLowerCase() : "";
+
+    if (tagName === "input" || tagName === "textarea" || tagName === "select" || element.isContentEditable) {
+      return true;
+    }
+
+    if (typeof element.closest === "function") {
+      return Boolean(element.closest("input, textarea, select, [contenteditable='true']"));
+    }
+
+    return false;
+  }
+
+  function togglePrimaryAudioPlaybackFromShortcut() {
+    const hasMedia =
+      Boolean(primaryAudioPlayer.src) ||
+      (primaryAudio && Number.isFinite(Number(primaryAudio.duration)) && Number(primaryAudio.duration) > 0);
+
+    if (!hasMedia) {
+      return;
+    }
+
+    if (primaryAudioPlayer.paused || primaryAudioPlayer.ended) {
+      const playPromise = primaryAudioPlayer.play();
+      if (playPromise && typeof playPromise.catch === "function") {
+        playPromise.catch(function (error) {
+          setAudioStatus("Playback failed: " + toErrorText(error));
+        });
+      }
+      return;
+    }
+
+    primaryAudioPlayer.pause();
+  }
+
+  function selectView(viewId, deferRender) {
     if (selectedViewId !== viewId) {
       selectedViewId = viewId;
-      scheduleRenderTransformStack();
+      if (!deferRender) {
+        scheduleRenderTransformStack();
+      }
+      return true;
     }
+
+    return false;
   }
 
   async function onPrimaryAudioSelected() {
@@ -13840,20 +13962,18 @@
 
     zoomOutButton.addEventListener("click", function () {
       const current = computeViewWindow(renderSpec.domainLength, item.id);
-      setViewZoom(item.id, renderSpec.domainLength, current.zoom / 1.2, 0.5);
+      setAllViewsZoom(item.id, renderSpec.domainLength, current.zoom / 1.2, 0.5);
       renderTransformStack();
     });
 
     zoomInButton.addEventListener("click", function () {
       const current = computeViewWindow(renderSpec.domainLength, item.id);
-      setViewZoom(item.id, renderSpec.domainLength, current.zoom * 1.2, 0.5);
+      setAllViewsZoom(item.id, renderSpec.domainLength, current.zoom * 1.2, 0.5);
       renderTransformStack();
     });
 
     zoomResetButton.addEventListener("click", function () {
-      const viewState = ensureViewState(item.id);
-      viewState.zoom = 1;
-      viewState.offset = 0;
+      resetAllViewsPanZoom(item.id);
       renderTransformStack();
     });
 
@@ -13879,7 +13999,7 @@
 
     const right = document.createElement("div");
     right.className = "transform-toolbar-group hint-group";
-    right.textContent = "Click = seek | Wheel = zoom | Drag = pan";
+    right.textContent = "Left click/drag = seek | Wheel up/down = zoom | Wheel sideways or right-drag/bar = pan";
 
     toolbar.appendChild(left);
     toolbar.appendChild(right);
@@ -13888,87 +14008,116 @@
   }
 
   function attachCanvasInteractions(canvas, item, renderSpec) {
-    let drag = null;
+    let mouseInteraction = null;
 
-    canvas.addEventListener("pointerdown", function (event) {
-      if (event.button !== 0) {
+    function seekFromClientX(clientX) {
+      const rect = canvas.getBoundingClientRect();
+      const localRatio = clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+      const globalRatio = localRatioToGlobalRatio(item.id, renderSpec.domainLength, localRatio);
+      seekAudioAtGlobalRatio(globalRatio);
+      updateAnimatedPlayheads();
+    }
+
+    function beginInteraction(mode, event) {
+      const selectionChanged = selectView(item.id, true);
+
+      if (mode === "seek") {
+        seekFromClientX(event.clientX);
+        mouseInteraction = {
+          mode,
+          selectionChanged
+        };
+      } else {
+        const viewState = ensureViewState(item.id);
+        mouseInteraction = {
+          mode,
+          startClientX: event.clientX,
+          startOffset: viewState.offset,
+          canvasWidth: Math.max(1, canvas.clientWidth),
+          selectionChanged
+        };
+      }
+    }
+
+    function endInteraction() {
+      if (!mouseInteraction) {
         return;
       }
 
-      selectView(item.id);
+      const finished = mouseInteraction;
+      mouseInteraction = null;
 
-      const viewState = ensureViewState(item.id);
-      drag = {
-        pointerId: event.pointerId,
-        startClientX: event.clientX,
-        startOffset: viewState.offset,
-        didPan: false
-      };
+      if (finished.selectionChanged) {
+        scheduleRenderTransformStack();
+      }
+    }
 
-      canvas.classList.add("is-dragging");
-      canvas.setPointerCapture(event.pointerId);
-    });
-
-    canvas.addEventListener("pointermove", function (event) {
-      if (!drag || drag.pointerId !== event.pointerId) {
+    function handleGlobalMouseMove(event) {
+      if (!mouseInteraction) {
         return;
       }
 
-      const dx = event.clientX - drag.startClientX;
-      if (Math.abs(dx) <= 2) {
+      if (mouseInteraction.mode === "seek") {
+        if ((event.buttons & 1) === 0) {
+          endInteraction();
+          return;
+        }
+
+        event.preventDefault();
+        seekFromClientX(event.clientX);
         return;
       }
 
-      drag.didPan = true;
+      if ((event.buttons & 2) === 0) {
+        endInteraction();
+        return;
+      }
 
-      const viewState = ensureViewState(item.id);
+      event.preventDefault();
+
+      const dx = event.clientX - mouseInteraction.startClientX;
       const windowInfo = computeViewWindow(renderSpec.domainLength, item.id);
-
-      const deltaStartRatio = (-dx / Math.max(1, canvas.clientWidth)) * windowInfo.visibleRatio;
+      const deltaStartRatio = (-dx / Math.max(1, mouseInteraction.canvasWidth)) * windowInfo.visibleRatio;
       const availableStartRatio = Math.max(1e-9, 1 - windowInfo.visibleRatio);
       const deltaOffset = deltaStartRatio / availableStartRatio;
 
-      viewState.offset = clamp(drag.startOffset + deltaOffset, 0, 1);
+      setAllViewsOffsetNormalized(item.id, mouseInteraction.startOffset + deltaOffset);
       scheduleRenderTransformStack();
-    });
+    }
 
-    canvas.addEventListener("pointerup", function (event) {
-      if (!drag || drag.pointerId !== event.pointerId) {
+    function handleGlobalMouseUp(event) {
+      if (!mouseInteraction) {
         return;
       }
 
-      const wasPan = drag.didPan;
-      drag = null;
-      canvas.classList.remove("is-dragging");
-      canvas.releasePointerCapture(event.pointerId);
+      endInteraction();
+    }
 
-      if (!wasPan) {
-        const rect = canvas.getBoundingClientRect();
-        const localRatio = clamp(
-          (event.clientX - rect.left) / Math.max(1, rect.width),
-          0,
-          1
-        );
-
-        const globalRatio = localRatioToGlobalRatio(item.id, renderSpec.domainLength, localRatio);
-        seekAudioAtGlobalRatio(globalRatio);
-        updateAnimatedPlayheads();
-      }
-    });
-
-    canvas.addEventListener("pointercancel", function (event) {
-      if (!drag || drag.pointerId !== event.pointerId) {
+    canvas.addEventListener("mousedown", function (event) {
+      if (event.button !== 0 && event.button !== 2) {
         return;
       }
 
-      drag = null;
-      canvas.classList.remove("is-dragging");
+      if (mouseInteraction) {
+        endInteraction();
+      }
+
+      if (event.button === 0) {
+        beginInteraction("seek", event);
+      } else {
+        beginInteraction("pan", event);
+      }
+
+      event.preventDefault();
     });
+
+    window.addEventListener("mousemove", handleGlobalMouseMove, { passive: false });
+    window.addEventListener("mouseup", handleGlobalMouseUp);
 
     canvas.addEventListener(
       "wheel",
       function (event) {
-        event.preventDefault();
+        let didChange = false;
 
         const rect = canvas.getBoundingClientRect();
         const anchorRatio = clamp(
@@ -13977,19 +14126,39 @@
           1
         );
 
-        const current = computeViewWindow(renderSpec.domainLength, item.id);
-        const factor = event.deltaY < 0 ? 1.18 : 1 / 1.18;
-        setViewZoom(item.id, renderSpec.domainLength, current.zoom * factor, anchorRatio);
+        if (Math.abs(event.deltaY) > 0.01) {
+          const current = computeViewWindow(renderSpec.domainLength, item.id);
+          const zoomFactor = Math.pow(1.0018, -event.deltaY);
+          setAllViewsZoom(item.id, renderSpec.domainLength, current.zoom * zoomFactor, anchorRatio);
+          didChange = true;
+        }
 
-        scheduleRenderTransformStack();
+        if (Math.abs(event.deltaX) > 0.01) {
+          const windowInfo = computeViewWindow(renderSpec.domainLength, item.id);
+          const deltaStartRatio =
+            (event.deltaX / Math.max(1, canvas.clientWidth)) * windowInfo.visibleRatio;
+          const availableStartRatio = Math.max(1e-9, 1 - windowInfo.visibleRatio);
+          const deltaOffset = deltaStartRatio / availableStartRatio;
+          const currentOffset = ensureViewState(item.id).offset;
+
+          setAllViewsOffsetNormalized(item.id, currentOffset + deltaOffset);
+          didChange = true;
+        }
+
+        if (didChange) {
+          event.preventDefault();
+          scheduleRenderTransformStack();
+        }
       },
       { passive: false }
     );
 
+    canvas.addEventListener("contextmenu", function (event) {
+      event.preventDefault();
+    });
+
     canvas.addEventListener("dblclick", function () {
-      const viewState = ensureViewState(item.id);
-      viewState.zoom = 1;
-      viewState.offset = 0;
+      resetAllViewsPanZoom(item.id);
       scheduleRenderTransformStack();
     });
   }
@@ -14011,24 +14180,36 @@
     track.appendChild(playhead);
     wrapper.appendChild(track);
 
-    const windowInfo = computeViewWindow(renderSpec.domainLength, item.id);
-    const widthPercent = Math.max(3, windowInfo.visibleRatio * 100);
-    const maxLeftPercent = Math.max(0, 100 - widthPercent);
-    const leftPercent = windowInfo.offsetNormalized * maxLeftPercent;
+    function updateThumbFromWindow() {
+      const windowInfo = computeViewWindow(renderSpec.domainLength, item.id);
+      const widthPercent = Math.max(3, windowInfo.visibleRatio * 100);
+      const maxLeftPercent = Math.max(0, 100 - widthPercent);
+      const leftPercent = windowInfo.offsetNormalized * maxLeftPercent;
 
-    thumb.style.width = widthPercent.toFixed(4) + "%";
-    thumb.style.left = leftPercent.toFixed(4) + "%";
+      thumb.style.width = widthPercent.toFixed(4) + "%";
+      thumb.style.left = leftPercent.toFixed(4) + "%";
+    }
 
-    track.addEventListener("pointerdown", function (event) {
-      if (event.target === thumb) {
+    updateThumbFromWindow();
+
+    let dragState = null;
+
+    function stopDrag() {
+      if (!dragState) {
         return;
       }
 
-      selectView(item.id);
+      dragState = null;
+      thumb.classList.remove("is-dragging");
+      track.classList.remove("is-dragging");
+      window.removeEventListener("pointermove", handleDragMove);
+      window.removeEventListener("pointerup", handleDragEnd);
+      window.removeEventListener("pointercancel", handleDragEnd);
+    }
 
-      const rect = track.getBoundingClientRect();
+    function jumpTrackToClientX(clientX, state) {
       const pointerRatio = clamp(
-        (event.clientX - rect.left) / Math.max(1, rect.width),
+        (clientX - state.trackLeft) / Math.max(1, state.trackWidth),
         0,
         1
       );
@@ -14041,62 +14222,92 @@
         availableStartRatio
       );
 
-      setViewOffsetFromStartRatio(item.id, renderSpec.domainLength, desiredStartRatio);
-      renderTransformStack();
-    });
+      setAllViewsOffsetFromStartRatio(item.id, renderSpec.domainLength, desiredStartRatio);
+    }
 
-    let thumbDrag = null;
+    function handleDragMove(event) {
+      if (!dragState || dragState.pointerId !== event.pointerId) {
+        return;
+      }
 
-    thumb.addEventListener("pointerdown", function (event) {
-      event.stopPropagation();
-      selectView(item.id);
+      event.preventDefault();
 
+      const dx = event.clientX - dragState.startClientX;
+      if (Math.abs(dx) <= 1) {
+        return;
+      }
+
+      dragState.didMove = true;
+
+      const deltaStartRatio = dx / Math.max(1, dragState.trackWidth);
+      const availableStartRatio = Math.max(1e-9, 1 - dragState.visibleRatio);
+      const deltaOffset = deltaStartRatio / availableStartRatio;
+
+      setAllViewsOffsetNormalized(item.id, dragState.startOffset + deltaOffset);
+
+      scheduleRenderTransformStack();
+    }
+
+    function handleDragEnd(event) {
+      if (!dragState) {
+        return;
+      }
+
+      if (event && dragState.pointerId !== event.pointerId) {
+        return;
+      }
+
+      const finishedState = dragState;
+
+      if (finishedState.fromTrack && !finishedState.didMove && event) {
+        jumpTrackToClientX(event.clientX, finishedState);
+      }
+
+      stopDrag();
+      scheduleRenderTransformStack();
+    }
+
+    function beginDrag(event, fromTrack) {
+      if (event.button !== 0) {
+        return;
+      }
+
+      const selectionChanged = selectView(item.id, true);
+      event.preventDefault();
+
+      const rect = track.getBoundingClientRect();
       const currentWindow = computeViewWindow(renderSpec.domainLength, item.id);
-      thumbDrag = {
+      dragState = {
         pointerId: event.pointerId,
         startClientX: event.clientX,
         startOffset: ensureViewState(item.id).offset,
-        visibleRatio: currentWindow.visibleRatio
+        visibleRatio: currentWindow.visibleRatio,
+        trackLeft: rect.left,
+        trackWidth: Math.max(1, rect.width),
+        fromTrack,
+        didMove: false,
+        selectionChanged
       };
 
       thumb.classList.add("is-dragging");
-      thumb.setPointerCapture(event.pointerId);
-    });
+      track.classList.add("is-dragging");
 
-    thumb.addEventListener("pointermove", function (event) {
-      if (!thumbDrag || thumbDrag.pointerId !== event.pointerId) {
+      window.addEventListener("pointermove", handleDragMove, { passive: false });
+      window.addEventListener("pointerup", handleDragEnd);
+      window.addEventListener("pointercancel", handleDragEnd);
+    }
+
+    track.addEventListener("pointerdown", function (event) {
+      if (event.target === playhead) {
         return;
       }
 
-      const rect = track.getBoundingClientRect();
-      const dx = event.clientX - thumbDrag.startClientX;
-      const deltaStartRatio = dx / Math.max(1, rect.width);
-      const availableStartRatio = Math.max(1e-9, 1 - thumbDrag.visibleRatio);
-      const deltaOffset = deltaStartRatio / availableStartRatio;
-
-      const viewState = ensureViewState(item.id);
-      viewState.offset = clamp(thumbDrag.startOffset + deltaOffset, 0, 1);
-
-      scheduleRenderTransformStack();
+      beginDrag(event, event.target !== thumb);
     });
 
-    thumb.addEventListener("pointerup", function (event) {
-      if (!thumbDrag || thumbDrag.pointerId !== event.pointerId) {
-        return;
-      }
-
-      thumbDrag = null;
-      thumb.classList.remove("is-dragging");
-      thumb.releasePointerCapture(event.pointerId);
-    });
-
-    thumb.addEventListener("pointercancel", function (event) {
-      if (!thumbDrag || thumbDrag.pointerId !== event.pointerId) {
-        return;
-      }
-
-      thumbDrag = null;
-      thumb.classList.remove("is-dragging");
+    thumb.addEventListener("pointerdown", function (event) {
+      event.stopPropagation();
+      beginDrag(event, false);
     });
 
     return {
@@ -14950,6 +15161,12 @@
       return;
     }
     state.stack.push(nextStackItem());
+
+    const syncSourceId = selectedViewId || (state.stack.length > 1 ? state.stack[0].id : null);
+    if (syncSourceId) {
+      syncPanZoomFromView(syncSourceId);
+    }
+
     renderStackControls();
     renderTransformStack();
     postState();
@@ -14964,6 +15181,19 @@
   primaryAudioPlayer.addEventListener("ended", stopPlayheadAnimation);
   primaryAudioPlayer.addEventListener("timeupdate", updateAnimatedPlayheads);
   primaryAudioPlayer.addEventListener("seeked", updateAnimatedPlayheads);
+
+  window.addEventListener("keydown", function (event) {
+    if (!(event.code === "Space" || event.key === " ")) {
+      return;
+    }
+
+    if (event.defaultPrevented || event.repeat || isTypingTarget(event.target)) {
+      return;
+    }
+
+    event.preventDefault();
+    togglePrimaryAudioPlaybackFromShortcut();
+  });
 
   customFilterbankInput.addEventListener("change", function () {
     void onCustomFilterbankSelected();

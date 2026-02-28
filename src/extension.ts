@@ -24,7 +24,6 @@ const AUDIO_EXTENSIONS = new Set([
   ".sph"
 ]);
 
-const EXTENSION_ID = "local-dev.vscode-audio-eda";
 const WORKBENCH_STATE_KEY = "audioEda.workbenchState";
 const WORKBENCH_STATE_BY_AUDIO_KEY = "audioEda.workbenchStateByAudio";
 const RECENT_WORKSPACES_KEY = "audioEda.recentWorkspaces";
@@ -756,6 +755,7 @@ function handleToolboxError(channel: vscode.OutputChannel, error: unknown): void
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  const extensionId = context.extension.id;
   const output = vscode.window.createOutputChannel("Audio EDA");
   const sidebarProvider = new AudioEdaSidebarProvider();
   const reopenGuard = new Set<string>();
@@ -992,7 +992,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const openExtensionSettingsCommand = vscode.commands.registerCommand(
     "audioEda.openExtensionSettings",
     async () => {
-      await vscode.commands.executeCommand("workbench.action.openSettings", `@ext:${EXTENSION_ID}`);
+      await vscode.commands.executeCommand("workbench.action.openSettings", `@ext:${extensionId}`);
     }
   );
 

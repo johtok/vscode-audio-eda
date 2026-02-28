@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="24" y1="16" x2="232" y2="240" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B1220" />
+      <stop offset="1" stop-color="#0F2E4D" />
+    </linearGradient>
+    <linearGradient id="waveGlow" x1="56" y1="128" x2="200" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#BAE6FD" />
+      <stop offset="0.5" stop-color="#7DD3FC" />
+      <stop offset="1" stop-color="#38BDF8" />
+    </linearGradient>
+    <linearGradient id="waveCore" x1="56" y1="128" x2="200" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7DD3FC" />
+      <stop offset="0.5" stop-color="#0EA5E9" />
+      <stop offset="1" stop-color="#0284C7" />
+    </linearGradient>
+  </defs>
+
+  <rect x="8" y="8" width="240" height="240" rx="44" fill="url(#bg)" />
+
+  <path
+    d="M28 128c28.5-44.5 61.9-66.7 100-66.7 38.2 0 71.5 22.2 100 66.7-28.5 44.5-61.8 66.7-100 66.7-38.1 0-71.5-22.2-100-66.7Z"
+    stroke="#7DD3FC"
+    stroke-width="12"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M55 128c19.8-27.8 44.1-41.7 73-41.7 29 0 53.2 13.9 73 41.7"
+    stroke="#38BDF8"
+    stroke-width="6"
+    stroke-linecap="round"
+    opacity="0.65"
+  />
+  <path
+    d="M55 128c19.8 27.8 44.1 41.7 73 41.7 29 0 53.2-13.9 73-41.7"
+    stroke="#38BDF8"
+    stroke-width="6"
+    stroke-linecap="round"
+    opacity="0.65"
+  />
+
+  <path
+    d="M56 129C63 129 67 125 72 125C77 125 81 137 86 137C91 137 95 106 100 106C105 106 109 157 114 157C119 157 123 90 128 90C133 90 137 160 142 160C147 160 151 112 156 112C161 112 165 132 170 132C175 132 179 126 186 126"
+    stroke="url(#waveGlow)"
+    stroke-width="12"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    opacity="0.85"
+  />
+  <path
+    d="M56 129C63 129 67 125 72 125C77 125 81 137 86 137C91 137 95 106 100 106C105 106 109 157 114 157C119 157 123 90 128 90C133 90 137 160 142 160C147 160 151 112 156 112C161 112 165 132 170 132C175 132 179 126 186 126"
+    stroke="url(#waveCore)"
+    stroke-width="6"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>
